@@ -1,129 +1,266 @@
-# **Multiprotocol Gateway Hub (V3) – Architectural Analysis Report**
-
-This document details the software architecture of the **Multiprotocol Gateway Hub (V3)**, a high-performance, multi-threaded C++ application designed for industrial data aggregation.
+# **Multiprotocol Gateway Hub (V3): Architectural Analysis & Data Flow Report**
 
 ---
 
-## **1. 📝 Executive Summary**
+## **1. Executive Summary**
 
-The V3 architecture is a sophisticated **Hybrid Asynchronous Model** built on **Boost.Asio** and **ZeroMQ (ZMQ)**. Its core innovation is a fully **decoupled data pipeline** utilizing a central **ZMQ PUB/SUB proxy**.
+This report details the software architecture and data flow of the Multiprotocol Gateway Hub (V3). The system is a high-performance, multi-threaded C++ application designed to aggregate data from industrial protocols (**Modbus, OPC-UA, MQTT, ZMQ**) and serve it in real-time to a local **Dear ImGui GUI** and remote **web clients**.
 
-This design eliminates the data-path mutexes and single-thread bottlenecks of previous versions, enabling massive scalability. The system separates the data flow into three distinct, non-blocking paths:
+The V3 architecture is a sophisticated **Hybrid Asynchronous Model** built on **Boost.Asio** and **ZeroMQ (ZMQ)**. Its defining feature is a fully *decoupled data pipeline* that uses a **central ZMQ PUB/SUB proxy**. This design removes mutex contention and eliminates the single-thread bottlenecks of previous versions. The system separates into three independent data-flow paths:
 
-* **Hot Path (Web Data):** A lock-free, high-throughput path for real-time device data to web clients.
-* **Cold Path (GUI Data):** A low-priority, throttled path for updating the local Dear ImGui GUI.
-* **Command Path (Control):** An isolated path for commands from the UI to devices.
+* **"Hot Path" (Web Data):** Lock-free, high-throughput real-time data delivery to web clients
+* **"Cold Path" (GUI Data):** Low-priority, throttled updates for the local GUI
+* **"Command Path" (Control):** Isolated command routing from UI to devices
 
-The architecture also employs a hybrid adapter model, using the efficient **Boost.Asio task pool** for polling protocols (Modbus, OPC-UA) and a robust **thread-per-device** model with an asynchronous **Reaper** for event-driven protocols (MQTT, ZMQ).
+V3 also uses a hybrid adapter model, combining:
+
+* A **Boost.Asio task pool** for polling protocols
+* A **thread-per-device model** (with an asynchronous "Reaper") for event-driven protocols
 
 ---
 
-## **2. ⚙️ Core Architectural Components & Threading Model**
+## **2. Core Architectural Components & Threading Model**
 
-The application's scalability relies on dividing work across a dynamic set of threads, each with a single, dedicated responsibility.
+The application's scalability comes from dividing work across a dynamic collection of threads, each responsible for a single task.
+
+---
 
 ### **2.1. Main Application Thread**
 
-* **Thread:** 1
-* **Role:** Runs `glfwPollEvents()` and renders the Dear ImGui UI. Represents the “view” and handles all user input.
+* **Thread Count:** 1
+* **Role:** Runs `glfwPollEvents()` and renders the full Dear ImGui UI (`DrawGatewayUI`).
+
+  * Acts as the *view layer*
+  * Handles all user interactions
+
+---
 
 ### **2.2. Asio Worker Pool**
 
-* **Threads:** *N* (typically `hardware_concurrency`)
-* **Role:** Worker pool for asynchronous/polling-based tasks (Modbus, OPC-UA). Executes `DoBlockingPoll` without requiring per-device threads.
+* **Threads:** *N* (defaults to `hardware_concurrency()`)
+* **Role:**
 
-### **2.3. Core Hub Threads (V3 Decoupled System)**
+  * Executes asynchronous polling-based tasks (Modbus, OPC-UA)
+  * Manages blocking I/O via `boost::asio::io_context`
+  * Enables thousands of devices handled by few threads
 
-| Thread Name          | Count | Data Path | Description             | Role                                                            |
-| -------------------- | ----- | --------- | ----------------------- | --------------------------------------------------------------- |
-| **RunDataProxy**     | 1     | Hot/Cold  | Heart of the data plane | Runs `zmq::proxy` bridging ingress → pubsub with **zero locks** |
-| **RunUwsSubscriber** | 1     | Hot Path  | High-priority web path  | SUB from pubsub → queue → wakes uWS                             |
-| **RunAggregator**    | 1     | Cold Path | Low-priority GUI path   | SUB from pubsub → 100 ms timer → updates `m_devices`            |
-| **RunCommandBridge** | 1     | Cmd Path  | Command router          | Forwards UI commands to adapter DEALER sockets                  |
-| **RunUwsServer**     | 1     | Hot Path  | WebSocket server        | Publishes queued hot-path data to clients                       |
+---
+
+### **2.3. Core Hub Threads (The “V3” Decoupled System)**
+
+These threads form the backbone of the V3 architecture.
+
+#### **• RunDataProxy (1 Thread)**
+
+* Acts as the **heart** of the data plane
+* Runs a high-performance, in-memory **ZMQ proxy**
+* PULLs from `inproc://data_ingress`
+* PUBs to `inproc://data_pubsub`
+* Zero parsing, zero locks
+
+#### **• RunUwsSubscriber (1 Thread — Hot Path)**
+
+* High-priority web data path
+* SUBscribes to `data_pubsub`
+* Pushes messages to `m_data_to_publish`
+* Wakes `RunUwsServer`
+
+#### **• RunAggregator (1 Thread — Cold Path)**
+
+* GUI data path
+* SUBscribes to `data_pubsub`
+* Runs on a 100ms timer
+* Updates the central `m_devices` map in a single locked operation
+
+#### **• RunCommandBridge (1 Thread — Command Path)**
+
+* Simplified V2 ZmqBridge
+* Polls `m_command_queue`
+* Routes commands using a ZMQ ROUTER
+
+#### **• RunUwsServer (1 Thread — Dynamic)**
+
+* The WebSocket server
+* On wake, publishes queued data to all web clients
+
+---
 
 ### **2.4. Dynamic Adapter Threads**
 
-| Thread Name                     | Count         | Purpose        | Role                                  |
-| ------------------------------- | ------------- | -------------- | ------------------------------------- |
-| **IProtocolAdapter::Run**       | 1 per Service | Command intake | Listens for DEALER messages           |
-| **Event-Driven Worker Threads** | 1 per Device  | Data ingress   | Blocking MQTT/ZMQ loops → ZMQ ingress |
-| **Reaper Threads**              | 1 per Service | Cleanup        | Joins stopped workers asynchronously  |
+#### **• IProtocolAdapter::Run (1 Thread per Adapter Service)**
+
+* Listens for commands via a DEALER socket
+
+#### **• Event-Driven Worker Threads (1 per MQTT/ZMQ Device)**
+
+* Blocking loop threads (e.g., MQTT message waiting)
+* Exit cleanly when stopped
 
 ---
 
-## **3. 📊 Data Flow Analysis (V3 Model)**
+## **3. Data Flow Analysis (The “V3” Model)**
 
-### **3.1. Data Ingress (Device → UI)**
-
-The system bifurcates the data plane into **Hot (Web)** and **Cold (GUI)** paths.
-
-1. Device worker formats JSON.
-2. Worker **PUSHes** to `inproc://data_ingress`.
-3. **RunDataProxy** PULLs and **PUBs** to `inproc://data_pubsub`.
-4. Data fans out:
-
-| Hot Path (Web)                               | Cold Path (Local GUI)                  |
-| -------------------------------------------- | -------------------------------------- |
-| 5a. `RunUwsSubscriber` receives instantly    | 5b. `RunAggregator` receives instantly |
-| 6a. Pushes into `m_publish_queue` + wake uWS | 6b. Buffers until 100 ms timer         |
-| 7a. Notifies server via `loop->defer()`      | 7b. Updates `m_devices` with one lock  |
-| 8a. `RunUwsServer` broadcasts to clients     | 8b. Main UI reads `m_devices`          |
-
-**Result:**
-
-* Hot path: lock-free, real-time.
-* Cold path: decoupled, low-frequency UI-safe updates.
-
-### **3.2. Command Egress (UI → Device)**
-
-1. UI pushes JSON into `m_command_queue`.
-2. **RunCommandBridge** dequeues.
-3. Sends 3-part ZMQ message to `m_cmd_router_socket`.
-4. Target adapter's **Run** thread receives via DEALER socket.
-5. Adapter dispatches to device via `HandleCommand()`.
+The data flow is fully segregated into independent asynchronous pipelines.
 
 ---
 
-## **4. 🔀 Protocol Adapter Architecture**
+## **3.1. Data Ingress (Device → UI) — Hot & Cold Paths**
 
-### **4.1. Type A – Asynchronous Polling (Modbus, OPC-UA)**
+The most important feature of V3: data is split at the earliest possible point into two priority paths.
 
-* No thread per device.
-* Uses `steady_timer` → posts `DoBlockingPoll` to Asio pool.
-* Completion returns to strand (`OnPollComplete`).
-* Publishes data via ZMQ.
+### **Ingress Sequence**
 
-### **4.2. Type B – Event-Driven (MQTT, ZMQ)**
+1. **Poll/Receive:** Worker thread fetches device data
+2. **Format:** Worker serializes data to Hub JSON standard
+3. **ZMQ PUSH:** Sent to `inproc://data_ingress`
+4. **ZMQ Proxy:** RunDataProxy re-broadcasts it to `data_pubsub`
 
-* **Thread-per-device** model.
-* Worker loop blocks waiting for data.
-* Publishes directly to ZMQ ingress.
+### **Path A — Hot Path (Web UI)**
 
----
+1. RunUwsSubscriber receives JSON
+2. Pushes into `m_publish_queue`
+3. Wakes the uWS loop
+4. RunUwsServer flushes queue to all clients
+5. **Result:** Ultra-low-latency web updates
 
-## **5. 🛡️ Robustness & Error Handling**
+### **Path B — Cold Path (Local GUI)**
 
-### **5.1. Reaper Pattern (Asynchronous Deletion)**
-
-Prevents UI stalls during removal of blocking worker threads.
-
-* `RemoveDevice` sets `should_stop = true`.
-* Worker moved into `m_reaper_queue`.
-* Returns immediately.
-* Reaper thread joins workers safely in background.
-
-### **5.2. Logs & Performance**
-
-* Hot-path log messages are filtered **before** allocation.
-* Log vector pruned at 10 000 entries.
+1. RunAggregator receives JSON
+2. Buffers until 100ms timer
+3. Updates `m_devices` once per cycle
+4. ImGui thread later renders the data
+5. **Result:** Smooth & non-blocking GUI updates
 
 ---
 
-## **6. 💻 User Interface (Dear ImGui)**
+## **3.2. Data Egress (UI → Device)**
 
-* **uWS Server Control**: Start/stop/port, disabled during active services.
-* **Live Log**: Timestamped, filtered, capped.
-* **Device Status**: Renders the decoupled `m_devices` map.
-* **Adapter Management**: Add/remove services/devices with Reaper cleanup.
-* **Send Test Command**: Inject raw JSON into the Command Path.
+The command path is fully isolated.
+
+1. UI sends JSON command
+2. Pushed into `m_command_queue`
+3. RunCommandBridge dequeues and routes using ROUTER socket
+4. Adapter thread receives via DEALER socket
+5. Adapter finds target device
+6. Issues protocol-specific command
+
+---
+
+## **4. Data Standards and Device Recognition**
+
+V3 enforces strict separation of concerns via a unified JSON schema.
+
+---
+
+### **4.1. Hub Data Standard (JSON)**
+
+```json
+{
+  "deviceId": "string",
+  "adapterName": "string",
+  "protocol": "string",
+  "timestamp": 1678886400,
+  "values": {
+    "key1": "value1",
+    "key2": 123.45,
+    "key3": true
+  }
+}
+```
+
+---
+
+### **4.2. Device Naming and Recognition**
+
+#### **Hub is “Dumb”**
+
+* Only indexes incoming data using `deviceId`
+* Does *not* create identifiers
+
+#### **Adapter is “Smart”**
+
+* Responsible for:
+
+  * Naming devices
+  * Parsing protocol data
+  * Creating valid JSON
+
+#### **Examples**
+
+**Modbus Worker:**
+
+```
+deviceId = workerName + ":reg_0_to_4"
+```
+
+**MQTT Worker:**
+
+```
+deviceId = adapterName + ":" + topicString
+```
+
+This enables thousands of unique data sources, even from a single adapter.
+
+---
+
+## **5. Web UI Structure and Flow (index.html)**
+
+The Web UI is a minimal diagnostic interface for testing the Hub.
+
+---
+
+### **5.1. Structure**
+
+* Read-only `#dataLog` textarea for incoming data
+* Editable `#commandInput` textarea for outgoing commands
+* One send button
+
+---
+
+### **5.2. Connection Management**
+
+* Button disabled on load
+* `ws.onopen` → enable button
+* `ws.onclose` → disable button
+
+---
+
+### **5.3. Data Ingress (Web → Browser)**
+
+1. uWS server publishes to:
+
+   ```
+   data/all
+   ```
+2. Client automatically SUBscribes
+3. `onmessage` appends JSON to `dataLog`
+
+---
+
+### **5.4. Data Egress (Browser → Hub)**
+
+Commands must follow this format:
+
+```json
+{
+  "targetAdapter": "MqttService1",
+  "targetDevice": "MyBroker",
+  "command": "set_led",
+  "state": "on"
+}
+```
+
+---
+
+## **🧱 Final Note — Longevity of Industrial Protocols**
+
+These industrial technologies remain highly relevant:
+
+* **EtherNet/IP** — strong and evolving
+* **PROFINET** — strong future, TSN-enabled
+* **EtherCAT** — long-term growth (EtherCAT-G emerging)
+* **CAN / CANopen** — ubiquitous
+* **UAVCAN** — rapidly growing in robotics/autonomy
+* **BACnet** — permanent in building automation
+* **RS-485** — still extremely common
+* **libserialport / SOEM / OpENer** — highly relevant libraries

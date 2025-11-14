@@ -14,7 +14,7 @@
  * (PULL "inproc://data_ingress", PUB "inproc://data_pubsub")
  * - RunUwsSubscriber: New thread. SUBscribes to "data_pubsub",
  * logs Ingress, and pushes data to the uWS queue.
- * - RunUwsServer: Runs the uS::Loop, publishing data from the queue.
+ * - RunUwsServer: Runs the uWS::Loop, publishing data from the queue.
  *
  * - "Cold Path" (Data to UI):
  * - RunAggregator: New thread. SUBscribes to "data_pubsub" on a
@@ -2007,4 +2007,5 @@ int main(int, char**) {
 
     return 0;
 }
+
 

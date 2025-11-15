@@ -107,6 +107,7 @@ struct DeviceData {
 static unsigned int s_hardware_cores = (std::thread::hardware_concurrency() > 0) ? std::thread::hardware_concurrency() : 4;
 static int s_worker_pool_size = (int)s_hardware_cores; // Default to the number of logical cores
 static int s_ws_port = 9001; // Default WebSocket port
+static std::string s_ws_host = "0.0.0.0"; // Default host (all interfaces)
 
 // --- FORWARD DECLARATIONS (for circular dependency fix) ---
 class ModbusTCPAdapter;
@@ -762,7 +763,7 @@ public:
             m_devices.erase(it); // Remove from map
         }
         // --- m_device_mutex is now UNLOCKED ---
-        
+
         // --- Step 2: Join the thread *outside* the lock ---
         if (worker_to_destroy) {
             // Now we wait for the thread to actually die.
@@ -1198,9 +1199,9 @@ public:
         m_aggregator_running = false;
         m_uws_subscriber_running = false;
 
-        if (m_uws_running) {
-            StopUwsServer();
-        }
+        /* if (m_uws_running) {
+             StopUwsServer();
+         }*/
 
         if (m_command_bridge_thread.joinable()) m_command_bridge_thread.join();
         if (m_data_proxy_thread.joinable()) m_data_proxy_thread.join();
@@ -1247,25 +1248,6 @@ public:
                 m_uws_thread.join();
             }
         }
-    }
-
-    void StopUwsServer() {
-        if (!m_uws_running) {
-            if (m_uws_thread.joinable()) {
-                m_uws_thread.detach();
-            }
-            PushNotification("uWS Server is already stopped.", false);
-            return;
-        }
-        if (m_uws_loop) {
-            m_uws_loop->defer([this] { m_uws_loop->free(); });
-        }
-        if (m_uws_thread.joinable()) {
-            m_uws_thread.detach();
-        }
-        m_uws_running = false;
-        AddLog("uWS Server stop signal sent.");
-        PushNotification("uWS Server stopping...", true);
     }
 
     bool GetUwsStatus() const {
@@ -1491,7 +1473,7 @@ public:
                 AddLog("Web UI Client disconnected.");
                 };
             local_app.ws<std::string>("/*", std::move(behavior))
-                .listen(s_ws_port, [this](auto* token) {
+                .listen(s_ws_host, s_ws_port, [this](auto* token) {
                 if (token) {
                     AddLog("uWS Server listening on port " + std::to_string(s_ws_port));
                     PushNotification("uWS Server started on port " + std::to_string(s_ws_port), true);
@@ -1720,38 +1702,72 @@ void DrawGatewayUI(GatewayHub& hub) {
 
     ImGui::Text("uWS Server:");
     ImGui::SameLine();
-    ImGui::PushItemWidth(100);
 
     bool adapters_exist = hub.HasAdapters();
     bool uws_running = hub.GetUwsStatus();
 
+    // --- Local buffers for host and port ---
+    // We use local buffers so the globals are only updated when "Start" is clicked.
     static int port_buf = s_ws_port;
+
+    static char s_ws_host_buf[256];
+    static bool s_host_buf_initialized = false;
+    if (!s_host_buf_initialized) {
+        // One-time copy from the global std::string to the local char buffer
+        strncpy(s_ws_host_buf, s_ws_host.c_str(), 256);
+        s_ws_host_buf[255] = '\0'; // Ensure null-termination
+        s_host_buf_initialized = true;
+    }
+
+    // --- Disable inputs if server is running or adapters exist ---
     if (adapters_exist || uws_running) ImGui::BeginDisabled(true);
+
+    // --- Port Input ---
+    ImGui::PushItemWidth(100);
     if (ImGui::InputInt("Port", &port_buf)) {
         if (port_buf < 1024) port_buf = 1024;
         if (port_buf > 65535) port_buf = 65535;
     }
-    if (adapters_exist || uws_running) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::SameLine();
 
+    // --- Host Input ---
+    ImGui::PushItemWidth(150); // A bit wider for IP/domain
+    ImGui::InputText("Host", s_ws_host_buf, 256);
+    ImGui::PopItemWidth();
+
+    // --- End Disable ---
+    if (adapters_exist || uws_running) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+
     if (uws_running) {
-        // --- PATCHED: "Stop" button is now correctly disabled ---
-        if (adapters_exist) ImGui::BeginDisabled(true);
-        if (ImGui::Button("Stop uWS Server")) {
-            hub.StopUwsServer();
-        }
-        if (adapters_exist) ImGui::EndDisabled();
+        // --- Running State ---
+
+        // Display "localhost" if listening on "0.0.0.0" for better clarity
+        const char* display_host = (s_ws_host == "0.0.0.0") ? "localhost" : s_ws_host.c_str();
+        ImGui::TextColored(ImVec4(0, 1, 0, 1), "Running at ws://%s:%d", display_host, s_ws_port);
 
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0, 1, 0, 1), "Running at ws://localhost:%d", s_ws_port);
+        float button_width = ImGui::CalcTextSize("Close HUB").x + ImGui::GetStyle().FramePadding.x * 2;
+        float right_edge = ImGui::GetWindowContentRegionMax().x;
+        ImGui::SetCursorPosX(right_edge - button_width);
+        if (ImGui::Button("Close HUB")) {
+            std::exit(0);
+        }
     }
     else {
+        // --- Stopped State ---
         if (adapters_exist) ImGui::BeginDisabled(true);
+
         if (ImGui::Button("Start uWS Server")) {
+            // --- Copy from local buffers to globals on Start ---
             s_ws_port = port_buf;
+            s_ws_host = s_ws_host_buf; // Copy the host string from the buffer
+
             hub.StartUwsServer();
         }
+
         if (adapters_exist) ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1, 0, 0, 1), "Stopped.");

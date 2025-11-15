@@ -119,6 +119,7 @@ static std::vector<std::string> g_logs;
 static bool g_log_show_ingress = true; // Show (Device -> WebUI)
 static bool g_log_show_egress = true;  // Show (WebUI -> Device)
 static const size_t g_log_max_lines = 10000; // Max log lines
+static const int g_zmq_rcvhwm = 10000;        // Max queued ZMQ messages
 
 struct Notification {
     std::string message;
@@ -170,6 +171,7 @@ public:
             m_data_push_socket.connect("inproc://data_ingress");
             m_cmd_socket.set(zmq::sockopt::routing_id, m_name);
             m_cmd_socket.connect("inproc://command_stream");
+            m_cmd_socket.set(zmq::sockopt::rcvhwm, g_zmq_rcvhwm);  // Limit queue to 10000 messages
         }
         catch (const zmq::error_t& e) {
             AddLog("Adapter connect error: " + std::string(e.what()));
@@ -233,6 +235,7 @@ public:
     virtual bool AddDevice(const std::string& device_name, const DeviceConfig& config) = 0;
     virtual bool RemoveDevice(const std::string& device_name) = 0;
     virtual bool RestartDevice(const std::string& device_name) = 0;
+    virtual bool IsDeviceActive(const std::string& device_name) = 0;
     virtual std::map<std::string, std::string> GetDeviceStatuses() = 0;
     virtual std::string GetName() const { return m_name; }
     virtual std::string GetProtocol() = 0;
@@ -418,6 +421,10 @@ public:
         }
         RemoveDevice(device_name);
         return AddDevice(device_name, config);
+    }
+    bool IsDeviceActive(const std::string& device_name) override {
+        std::lock_guard<std::mutex> lock(m_device_mutex);
+        return m_devices.count(device_name);
     }
     friend class ModbusDeviceWorker;
 protected:
@@ -630,6 +637,10 @@ public:
         RemoveDevice(device_name);
         return AddDevice(device_name, config);
     }
+    bool IsDeviceActive(const std::string& device_name) override {
+        std::lock_guard<std::mutex> lock(m_device_mutex);
+        return m_devices.count(device_name);
+    }
     friend class OpcuaDeviceWorker;
 protected:
     void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override {
@@ -736,22 +747,36 @@ public:
         }
     }
     bool RemoveDevice(const std::string& device_name) override {
-        std::unique_ptr<MqttDeviceWorker> worker_to_reap;
+
+        std::unique_ptr<MqttDeviceWorker> worker_to_destroy;
+
+        // --- Step 1: Atomically move the worker out of the map ---
         {
-            std::lock_guard<std::mutex> lock(m_device_mutex);
-            if (!m_devices.count(device_name)) return false;
-            auto& worker = m_devices[device_name];
-            worker->should_stop = true;
-            worker_to_reap = std::move(m_devices[device_name]);
-            m_devices.erase(device_name);
+            std::lock_guard<std::mutex> lock(m_device_mutex); // Lock adapter's map
+
+            auto it = m_devices.find(device_name);
+            if (it == m_devices.end()) return false; // Not found
+
+            it->second->should_stop = true; // Signal thread to stop
+            worker_to_destroy = std::move(it->second); // Move ownership
+            m_devices.erase(it); // Remove from map
         }
-        {
-            std::lock_guard<std::mutex> lock(m_reaper_mutex);
-            m_reaper_queue.push_back(std::move(worker_to_reap));
+        // --- m_device_mutex is now UNLOCKED ---
+        
+        // --- Step 2: Join the thread *outside* the lock ---
+        if (worker_to_destroy) {
+            // Now we wait for the thread to actually die.
+            // This is safe and won't deadlock because no locks are held.
+            if (worker_to_destroy->thread.joinable()) {
+                worker_to_destroy->thread.join();
+            }
         }
-        AddLog("MQTT: Queued device for removal: " + device_name);
+        // The worker's thread is now 100% dead.
+        // worker_to_destroy's destructor runs, cleaning up the worker.
+
         return true;
     }
+
     bool RestartDevice(const std::string& device_name) override {
         DeviceConfig config;
         {
@@ -770,6 +795,13 @@ public:
         RemoveDevice(device_name);
         return AddDevice(device_name, config);
     }
+
+    bool IsDeviceActive(const std::string& device_name) override {
+        // Lock this adapter's device map and check for the key
+        std::lock_guard<std::mutex> lock(m_device_mutex);
+        return m_devices.count(device_name);
+    }
+
 protected:
     void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override {
         std::lock_guard<std::mutex> lock(m_device_mutex);
@@ -994,6 +1026,11 @@ public:
         RemoveDevice(device_name);
         return AddDevice(device_name, config);
     }
+    bool IsDeviceActive(const std::string& device_name) override {
+        std::lock_guard<std::mutex> lock(m_device_mutex);
+        return m_devices.count(device_name);
+    }
+
 protected:
     void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override {
         if (g_log_show_egress) AddLog("ZMQ HandleCommand: " + cmd.dump(), LogType::EGRESS);
@@ -1306,6 +1343,7 @@ public:
             zmq::socket_t pub(m_zmq_context, zmq::socket_type::pub);
             pub.bind("inproc://data_pubsub");
             pull.set(zmq::sockopt::rcvtimeo, 100);
+            pull.set(zmq::sockopt::rcvhwm, g_zmq_rcvhwm);   // Limit queue to 10000 messages
             while (m_proxy_running) {
                 zmq::message_t msg;
                 std::optional<size_t> res = pull.recv(msg, zmq::recv_flags::none);
@@ -1320,28 +1358,70 @@ public:
         AddLog("Data proxy thread stopped.");
     }
 
-    // --- PATCHED: Changed sleep to 100ms for faster UI updates ---
     void RunAggregator() {
         AddLog("Aggregator thread started.");
         try {
             zmq::socket_t sub(m_zmq_context, zmq::socket_type::sub);
             sub.connect("inproc://data_pubsub");
             sub.set(zmq::sockopt::subscribe, "");
-            std::vector<std::string> messages;
+            sub.set(zmq::sockopt::conflate, 1);
+            sub.set(zmq::sockopt::rcvtimeo, 100);
+
             while (m_aggregator_running) {
-                messages.clear();
                 zmq::message_t msg;
-                while (sub.recv(msg, zmq::recv_flags::dontwait)) {
-                    messages.push_back(msg.to_string());
-                }
-                if (!messages.empty()) {
-                    std::lock_guard<std::mutex> lock(m_devices_mutex);
-                    for (const auto& s : messages) {
+                std::optional<size_t> res = sub.recv(msg, zmq::recv_flags::none);
+
+                if (res.has_value()) { // We got a message
+                    std::string s = msg.to_string();
+                    std::string adapterName, deviceId;
+
+                    // --- Step 1: Parse both keys ---
+                    try {
+                        nlohmann::json data = nlohmann::json::parse(s);
+                        adapterName = data.value("adapterName", "");
+                        // NOTE: Your MqttAdapter JSON uses worker->name, which is the deviceId
+                        deviceId = data.value("deviceId", "");
+                    }
+                    catch (const std::exception& e) {
+                        AddLog("Aggregator: Bad JSON: " + std::string(e.what()));
+                        continue; // Ignore bad JSON
+                    }
+
+                    if (adapterName.empty() || deviceId.empty()) continue;
+
+                    // --- Step 2: Perform the NEW TWO-LEVEL "Source of Truth" check ---
+                    bool deviceIsStillActive = false;
+                    {
+                        std::lock_guard<std::mutex> adapter_lock(m_adapters_mutex);
+                        auto it = m_adapters.find(adapterName);
+
+                        if (it != m_adapters.end()) {
+                            // Adapter is alive. Now ask the adapter: is the DEVICE alive?
+                            deviceIsStillActive = it->second->IsDeviceActive(deviceId);
+                        }
+                        // else: adapter is gone, so deviceIsStillActive remains false
+                    }
+
+                    // --- Step 3: Act on verified data ---
+                    if (deviceIsStillActive) {
+                        // BOTH adapter and device are confirmed alive.
+                        // It's safe to create or update.
+                        std::lock_guard<std::mutex> lock(m_devices_mutex);
                         _UpdateDeviceMap(s);
                     }
+                    else {
+                        // This is a "zombie" message. The adapter is gone OR
+                        // the adapter has already deleted this device.
+                        // We must drop the message.
+
+                        // As a final cleanup, we can also force-remove
+                        // the device from the hub's map, just in case.
+                        std::lock_guard<std::mutex> lock(m_devices_mutex);
+                        if (m_devices.count(deviceId)) {
+                            m_devices.erase(deviceId);
+                        }
+                    }
                 }
-                // --- MODIFIED: Faster UI update rate ---
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
         }
         catch (const zmq::error_t& e) {
@@ -1350,7 +1430,6 @@ public:
         AddLog("Aggregator thread stopped.");
     }
 
-    // --- PATCHED: Added log filter check ---
     void RunUwsSubscriber() {
         AddLog("uWS Subscriber thread started.");
         try {
@@ -1358,6 +1437,7 @@ public:
             sub.connect("inproc://data_pubsub");
             sub.set(zmq::sockopt::subscribe, "");
             sub.set(zmq::sockopt::rcvtimeo, 100);
+            sub.set(zmq::sockopt::conflate, 1);
             while (m_uws_subscriber_running) {
                 zmq::message_t msg;
                 std::optional<size_t> res = sub.recv(msg, zmq::recv_flags::none);
@@ -1384,7 +1464,6 @@ public:
         }
         AddLog("uWS Subscriber thread stopped.");
     }
-
 
     void RunUwsServer() {
         AddLog("uWS thread started.");

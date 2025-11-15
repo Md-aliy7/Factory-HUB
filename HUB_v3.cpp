@@ -667,6 +667,7 @@ struct MqttDeviceWorker {
     std::vector<std::string> subscribeTopics;
     MQTTClient client;
     std::thread thread;
+    std::mutex client_mutex;
     std::atomic<bool> should_stop;
     std::string status;
     IProtocolAdapter* adapter;
@@ -788,15 +789,34 @@ protected:
         }
     }
 
-    // --- PATCHED: Fixed deviceId spam ---
     static int on_message_arrived(void* context, char* topicName, int topicLen, MQTTClient_message* message) {
         MqttDeviceWorker* worker = static_cast<MqttDeviceWorker*>(context);
-        if (!worker || worker->should_stop) {
+
+        // Context should always be valid if Paho is working
+        if (worker == nullptr) {
+            // Abnormal case: free message to prevent leak
             MQTTClient_freeMessage(&message);
             MQTTClient_free(topicName);
-            return 0;
+            return 1;
         }
-        std::string topic(topicName);
+
+        // 1. Acquire the lock
+        std::lock_guard<std::mutex> lock(worker->client_mutex);
+
+        // 2. Check if the client is being destroyed *after* getting the lock.
+        // If client is NULL, destroy() has been called.
+        // That function will free all resources, including this message.
+        // Freeing it here would be a double-free CRASH.
+        if (worker->client == nullptr || worker->should_stop) {
+            // Client is gone or stopping. DO NOT free the message.
+            // Just return to acknowledge.
+            return 1;
+        }
+
+        // Use topicLen! topicName is not guaranteed to be null-terminated.
+        std::string topic(topicName, topicLen);
+        // --- END BUG FIX ---
+
         std::string payload((char*)message->payload, message->payloadlen);
         worker->status = "Msg received on " + topic;
 
@@ -814,6 +834,8 @@ protected:
 
         static_cast<MqttAdapter*>(worker->adapter)->PushData(j.dump());
 
+        // We are still inside the lock and the client is valid,
+        // so it is 100% safe to free the message here.
         MQTTClient_freeMessage(&message);
         MQTTClient_free(topicName);
         return 1;
@@ -824,6 +846,11 @@ protected:
         conn_opts.keepAliveInterval = 20;
         conn_opts.cleansession = 1;
         conn_opts.connectTimeout = 5; // 5 seconds
+        // Ensure client is null before creation
+        {
+            std::lock_guard<std::mutex> lock(worker->client_mutex);
+            worker->client = nullptr;
+        }
         int rc = MQTTClient_create(&worker->client, worker->brokerUri.c_str(), worker->clientId.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
         if (rc != MQTTCLIENT_SUCCESS) {
             worker->status = "Error: Failed to create client"; return;
@@ -841,8 +868,12 @@ protected:
         while (!worker->should_stop) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        MQTTClient_disconnect(worker->client, 1000);
-        MQTTClient_destroy(&worker->client);
+        {
+            std::lock_guard<std::mutex> lock(worker->client_mutex);
+            MQTTClient_disconnect(worker->client, 1000);
+            MQTTClient_destroy(&worker->client);
+            worker->client = nullptr; // Set to null to signal destruction
+        }
         worker->status = "Stopped";
     }
     std::thread m_reaper_thread;
@@ -2007,5 +2038,3 @@ int main(int, char**) {
 
     return 0;
 }
-
-

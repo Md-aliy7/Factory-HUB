@@ -142,10 +142,17 @@ void AddLog(const std::string& msg, LogType type = LogType::SYSTEM) {
     if (type == LogType::EGRESS && !g_log_show_egress) return;
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf; // Structure to hold the time
+#ifdef _WIN32
+    // Use the thread-safe version for Windows (MSVC)
+    localtime_s(&tm_buf, &in_time_t);
+#else
+    // Use the thread-safe version for POSIX (Linux, macOS)
+    localtime_r(&in_time_t, &tm_buf);
+#endif
     std::stringstream ss;
-    ss << std::put_time(std::localtime(&in_time_t), "%H:%M:%S");
-    g_logs.push_back("[" + ss.str() + "] " + msg);
-    if (g_logs.size() > g_log_max_lines) {
+    ss << std::put_time(&tm_buf, "%H:%M:%S");
+    g_logs.push_back("[" + ss.str() + "] " + msg);    if (g_logs.size() > g_log_max_lines) {
         size_t erase_count = g_logs.size() - g_log_max_lines + (g_log_max_lines / 10);
         g_logs.erase(g_logs.begin(), g_logs.begin() + erase_count);
     }

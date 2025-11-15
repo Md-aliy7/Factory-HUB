@@ -1199,10 +1199,6 @@ public:
         m_aggregator_running = false;
         m_uws_subscriber_running = false;
 
-        /* if (m_uws_running) {
-             StopUwsServer();
-         }*/
-
         if (m_command_bridge_thread.joinable()) m_command_bridge_thread.join();
         if (m_data_proxy_thread.joinable()) m_data_proxy_thread.join();
         if (m_aggregator_thread.joinable()) m_aggregator_thread.join();
@@ -1231,19 +1227,38 @@ public:
     }
 
     void StartUwsServer() {
-        if (m_uws_running) {
-            PushNotification("uWS Server is already running.", false);
-            return;
+        try {
+            if (m_uws_running) {
+                PushNotification("uWS Server is already running.", false);
+                return;
+            }
+            if (m_uws_thread.joinable()) {
+                m_uws_thread.join();
+            }
+
+            m_uws_running = true;
+            m_uws_thread = std::thread(&GatewayHub::RunUwsServer, this);
+
+            std::unique_lock<std::mutex> lock(m_uws_mutex);
+            if (m_uws_cv.wait_for(lock, std::chrono::seconds(5),
+                [this] { return m_uws_loop != nullptr && m_uws_app_ptr != nullptr; })) {
+
+                AddLog("uWS Server initialized by user.");
+            }
+            else {
+                AddLog("uWS Server failed to initialize (timeout).", LogType::SYSTEM);
+                PushNotification("uWS Server failed to start (timeout).", false);
+                m_uws_running = false;
+
+                if (m_uws_thread.joinable()) {
+                    m_uws_thread.join();
+                }
+            }
         }
-        m_uws_thread = std::thread(&GatewayHub::RunUwsServer, this);
-        std::unique_lock<std::mutex> lock(m_uws_mutex);
-        if (m_uws_cv.wait_for(lock, std::chrono::seconds(5), [this] { return m_uws_loop != nullptr && m_uws_app_ptr != nullptr; })) {
-            AddLog("uWS Server initialized by user.");
-        }
-        else {
-            AddLog("uWS Server failed to initialize (timeout).", LogType::SYSTEM);
-            PushNotification("uWS Server failed to start (timeout).", false);
+        catch (...) {
+            AddLog("Unexpected exception starting uWS server.", LogType::SYSTEM);
             m_uws_running = false;
+
             if (m_uws_thread.joinable()) {
                 m_uws_thread.join();
             }
@@ -1481,7 +1496,11 @@ public:
                 }
                 else {
                     AddLog("uWS Server FAILED to listen on port " + std::to_string(s_ws_port));
-                    PushNotification("Error: Port " + std::to_string(s_ws_port) + " already in use!", false);
+                    PushNotification(
+                        "Error: Could not start server at " + s_ws_host + ":" + std::to_string(s_ws_port) +
+                        ". The host or port may be invalid or already in use.",
+                        false
+                    );
                     m_uws_running = false;
                 }
                     });
@@ -1707,9 +1726,7 @@ void DrawGatewayUI(GatewayHub& hub) {
     bool uws_running = hub.GetUwsStatus();
 
     // --- Local buffers for host and port ---
-    // We use local buffers so the globals are only updated when "Start" is clicked.
     static int port_buf = s_ws_port;
-
     static char s_ws_host_buf[256];
     static bool s_host_buf_initialized = false;
     if (!s_host_buf_initialized) {
@@ -1720,7 +1737,7 @@ void DrawGatewayUI(GatewayHub& hub) {
     }
 
     // --- Disable inputs if server is running or adapters exist ---
-    if (adapters_exist || uws_running) ImGui::BeginDisabled(true);
+    if (uws_running) ImGui::BeginDisabled(true);
 
     // --- Port Input ---
     ImGui::PushItemWidth(100);
@@ -1737,44 +1754,61 @@ void DrawGatewayUI(GatewayHub& hub) {
     ImGui::PopItemWidth();
 
     // --- End Disable ---
-    if (adapters_exist || uws_running) ImGui::EndDisabled();
+    if (uws_running) ImGui::EndDisabled();
 
     ImGui::SameLine();
 
     if (uws_running) {
         // --- Running State ---
-
         // Display "localhost" if listening on "0.0.0.0" for better clarity
         const char* display_host = (s_ws_host == "0.0.0.0") ? "localhost" : s_ws_host.c_str();
         ImGui::TextColored(ImVec4(0, 1, 0, 1), "Running at ws://%s:%d", display_host, s_ws_port);
-
         ImGui::SameLine();
-        float button_width = ImGui::CalcTextSize("Close HUB").x + ImGui::GetStyle().FramePadding.x * 2;
+        float button_width = ImGui::CalcTextSize("Shut Down Server").x + ImGui::GetStyle().FramePadding.x * 2;
         float right_edge = ImGui::GetWindowContentRegionMax().x;
         ImGui::SetCursorPosX(right_edge - button_width);
-        if (ImGui::Button("Close HUB")) {
-            std::exit(0);
+        static bool show_exit_popup = false;
+        if (ImGui::Button("Shut Down Server")) {
+            show_exit_popup = true;
+        }
+        if (show_exit_popup) {
+            ImGui::OpenPopup("Exit Confirmation");
+        }
+        if (ImGui::BeginPopupModal("Exit Confirmation", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::Text("Are you sure you want to exit?");
+            ImGui::Separator();
+
+            if (ImGui::Button("Yes", ImVec2(120, 0))) {
+                std::exit(0);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("No", ImVec2(120, 0))) {
+                show_exit_popup = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
     }
     else {
-        // --- Stopped State ---
-        if (adapters_exist) ImGui::BeginDisabled(true);
+        static bool server_running = false;
 
-        if (ImGui::Button("Start uWS Server")) {
-            // --- Copy from local buffers to globals on Start ---
+        ImGui::BeginDisabled(server_running);
+        if (ImGui::Button("Start Server")) {
             s_ws_port = port_buf;
-            s_ws_host = s_ws_host_buf; // Copy the host string from the buffer
+            s_ws_host = s_ws_host_buf;
 
-            hub.StartUwsServer();
+            server_running = true;
+
+            // Capture hub by reference is okay if it's global or static
+            std::thread([&hub]() {
+                hub.StartUwsServer();
+                server_running = false;
+                }).detach();
         }
-
-        if (adapters_exist) ImGui::EndDisabled();
+        ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1, 0, 0, 1), "Stopped.");
-        if (adapters_exist) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(Remove all services to change)");
-        }
     }
     ImGui::Separator();
 

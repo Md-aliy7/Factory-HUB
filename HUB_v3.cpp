@@ -1,5 +1,5 @@
 /*
- * Multiprotocol Gateway Hub (V3 - fully cross-platform for Windows, Linux, and macOS)
+ * Multiprotocol Gateway Hub (V3 - ZMQ Proxy Architecture)
  *
  * Architecture (Decoupled PUB/SUB):
  * 1. Main Thread: Runs Dear ImGui loop.
@@ -690,9 +690,38 @@ struct MqttDeviceWorker {
     std::atomic<bool> should_stop;
     std::string status;
     IProtocolAdapter* adapter;
+
+    // --- Robust Connection Parameters ---
+    std::string username;
+    std::string password;
+
+    bool useTls;
+    std::string caFile;
+    std::string certFile;
+    std::string keyFile;
+
+    bool cleanSession;
+    int keepAlive;
+    int connectTimeout;
+
+    std::string lwtTopic;
+    std::string lwtPayload;
+    int lwtQos;
+    bool lwtRetain;
+
+    int subscribeQos;
+
     MqttDeviceWorker(std::string n, std::string uri, std::string cid, std::string cmd_topic, std::vector<std::string> sub_topics, IProtocolAdapter* parent)
         : name(n), brokerUri(uri), clientId(cid), commandTopic(cmd_topic), subscribeTopics(sub_topics),
-        client(nullptr), should_stop(false), status("Idle"), adapter(parent) {
+        client(nullptr), should_stop(false), status("Idle"), adapter(parent),
+        useTls(false),
+        cleanSession(true),
+        keepAlive(60),
+        connectTimeout(5),
+        lwtQos(1),
+        lwtRetain(false),
+        subscribeQos(1)
+    {
     }
 };
 
@@ -731,19 +760,60 @@ public:
     bool AddDevice(const std::string& device_name, const DeviceConfig& config) override {
         std::lock_guard<std::mutex> lock(m_device_mutex);
         if (m_devices.count(device_name)) return false;
+
+        // --- Helper lambda to safely get optional config values ---
+        auto getConfigOr = [&](const std::string& key, const std::string& defaultValue) -> std::string {
+            auto it = config.find(key);
+            if (it != config.end() && !it->second.empty()) {
+                return it->second;
+            }
+            return defaultValue;
+            };
+
         try {
+            // --- Required ---
             std::string brokerUri = config.at("brokerUri");
-            std::string clientId = device_name + "_client";
-            std::string commandTopic = "";
-            auto it_cmd = config.find("commandTopic");
-            if (it_cmd != config.end()) commandTopic = it_cmd->second;
             std::string sub_topics_str = config.at("subscribeTopics");
+
+            // --- Optional ---
+            std::string clientId = getConfigOr("clientId", device_name + "_client");
+            std::string commandTopic = getConfigOr("commandTopic", "");
+
             std::vector<std::string> sub_topics;
             std::stringstream ss(sub_topics_str);
             std::string topic;
-            while (std::getline(ss, topic, ',')) sub_topics.push_back(topic);
+            while (std::getline(ss, topic, ',')) {
+                if (!topic.empty()) sub_topics.push_back(topic);
+            }
             if (sub_topics.empty()) return false;
+
             auto worker = std::make_unique<MqttDeviceWorker>(device_name, brokerUri, clientId, commandTopic, sub_topics, this);
+
+            // --- Populate all worker fields from config ---
+            worker->username = getConfigOr("username", "");
+            worker->password = getConfigOr("password", "");
+
+            worker->useTls = (getConfigOr("useTls", "false") == "true");
+            worker->caFile = getConfigOr("caFile", "");
+            worker->certFile = getConfigOr("certFile", "");
+            worker->keyFile = getConfigOr("keyFile", "");
+
+            worker->cleanSession = (getConfigOr("cleanSession", "true") == "true");
+            worker->lwtRetain = (getConfigOr("lwtRetain", "false") == "true");
+
+            try { worker->keepAlive = std::stoi(getConfigOr("keepAlive", "60")); }
+            catch (...) { worker->keepAlive = 60; }
+            try { worker->connectTimeout = std::stoi(getConfigOr("connectTimeout", "5")); }
+            catch (...) { worker->connectTimeout = 5; }
+            try { worker->subscribeQos = std::stoi(getConfigOr("subscribeQos", "1")); }
+            catch (...) { worker->subscribeQos = 1; }
+            try { worker->lwtQos = std::stoi(getConfigOr("lwtQos", "1")); }
+            catch (...) { worker->lwtQos = 1; }
+
+            worker->lwtTopic = getConfigOr("lwtTopic", "");
+            worker->lwtPayload = getConfigOr("lwtPayload", "");
+            // --- End of NEW Population ---
+
             worker->thread = std::thread(&MqttAdapter::DevicePollLoop, this, worker.get());
             m_devices[device_name] = std::move(worker);
             AddLog("MQTT: Added device " + device_name);
@@ -791,14 +861,37 @@ public:
             std::lock_guard<std::mutex> lock(m_device_mutex);
             auto it = m_devices.find(device_name);
             if (it == m_devices.end()) return false;
-            config["brokerUri"] = it->second->brokerUri;
-            config["commandTopic"] = it->second->commandTopic;
+
+            auto& worker = it->second;
+
+            // --- Base settings ---
+            config["brokerUri"] = worker->brokerUri;
+            config["clientId"] = worker->clientId;
+            config["commandTopic"] = worker->commandTopic;
+
             std::stringstream ss;
-            for (size_t i = 0; i < it->second->subscribeTopics.size(); ++i) {
-                ss << it->second->subscribeTopics[i];
-                if (i < it->second->subscribeTopics.size() - 1) ss << ",";
+            for (size_t i = 0; i < worker->subscribeTopics.size(); ++i) {
+                ss << worker->subscribeTopics[i];
+                if (i < worker->subscribeTopics.size() - 1) ss << ",";
             }
             config["subscribeTopics"] = ss.str();
+
+            // --- NEW: Add all new settings to config ---
+            config["username"] = worker->username;
+            config["password"] = worker->password; // Note: storing pass in map
+            config["useTls"] = worker->useTls ? "true" : "false";
+            config["caFile"] = worker->caFile;
+            config["certFile"] = worker->certFile;
+            config["keyFile"] = worker->keyFile;
+            config["cleanSession"] = worker->cleanSession ? "true" : "false";
+            config["keepAlive"] = std::to_string(worker->keepAlive);
+            config["connectTimeout"] = std::to_string(worker->connectTimeout);
+            config["subscribeQos"] = std::to_string(worker->subscribeQos);
+            config["lwtTopic"] = worker->lwtTopic;
+            config["lwtPayload"] = worker->lwtPayload;
+            config["lwtQos"] = std::to_string(worker->lwtQos);
+            config["lwtRetain"] = worker->lwtRetain ? "true" : "false";
+            // --- End of NEW settings ---
         }
         RemoveDevice(device_name);
         return AddDevice(device_name, config);
@@ -882,37 +975,78 @@ protected:
     }
 
     void DevicePollLoop(MqttDeviceWorker* worker) {
+        // --- NEW: Initialize all option structs ---
         MQTTClient_connectOptions conn_opts = MQTTClient_connectOptions_initializer;
-        conn_opts.keepAliveInterval = 20;
-        conn_opts.cleansession = 1;
-        conn_opts.connectTimeout = 5; // 5 seconds
+        MQTTClient_SSLOptions ssl_opts = MQTTClient_SSLOptions_initializer;
+        MQTTClient_willOptions lwt_opts = MQTTClient_willOptions_initializer;
+
+        // --- 1. Populate Connect Options ---
+        conn_opts.keepAliveInterval = worker->keepAlive;
+        conn_opts.cleansession = worker->cleanSession;
+        conn_opts.connectTimeout = worker->connectTimeout;
+
+        if (!worker->username.empty()) {
+            conn_opts.username = worker->username.c_str();
+            conn_opts.password = worker->password.c_str();
+        }
+
+        // --- 2. Populate LWT (Will) Options ---
+        if (!worker->lwtTopic.empty()) {
+            lwt_opts.topicName = worker->lwtTopic.c_str();
+            lwt_opts.message = worker->lwtPayload.c_str();
+            lwt_opts.qos = worker->lwtQos;
+            lwt_opts.retained = worker->lwtRetain;
+            conn_opts.will = &lwt_opts; // Link LWT to connect options
+        }
+
+        // --- 3. Populate SSL/TLS Options ---
+        if (worker->useTls) {
+            // Paho calls the client certificate 'keyStore'
+            ssl_opts.keyStore = worker->certFile.empty() ? NULL : worker->certFile.c_str();
+            ssl_opts.privateKey = worker->keyFile.empty() ? NULL : worker->keyFile.c_str();
+            ssl_opts.trustStore = worker->caFile.empty() ? NULL : worker->caFile.c_str();
+
+            // This enables server certificate verification
+            ssl_opts.enableServerCertAuth = 1;
+
+            conn_opts.ssl = &ssl_opts; // Link SSL to connect options
+        }
+        // --- End of NEW Option Setup ---
+
         // Ensure client is null before creation
         {
             std::lock_guard<std::mutex> lock(worker->client_mutex);
             worker->client = nullptr;
         }
+
         int rc = MQTTClient_create(&worker->client, worker->brokerUri.c_str(), worker->clientId.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
         if (rc != MQTTCLIENT_SUCCESS) {
             worker->status = "Error: Failed to create client"; return;
         }
+
         MQTTClient_setCallbacks(worker->client, worker, NULL, on_message_arrived, NULL);
+
         if (MQTTClient_connect(worker->client, &conn_opts) != MQTTCLIENT_SUCCESS) {
             worker->status = "Error: Connection Failed";
             MQTTClient_destroy(&worker->client);
             return;
         }
-        worker->status = "Running";
+
+        worker->status = "Running & Subscribed";
         for (const std::string& topic : worker->subscribeTopics) {
-            MQTTClient_subscribe(worker->client, topic.c_str(), 1);
+            // --- NEW: Subscribe with specified QoS ---
+            MQTTClient_subscribe(worker->client, topic.c_str(), worker->subscribeQos);
         }
+
         while (!worker->should_stop) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
+
         {
             std::lock_guard<std::mutex> lock(worker->client_mutex);
             MQTTClient_disconnect(worker->client, 1000);
             MQTTClient_destroy(&worker->client);
-            worker->client = nullptr; // Set to null to signal destruction
+            worker->client = nullptr;
         }
         worker->status = "Stopped";
     }
@@ -940,17 +1074,55 @@ protected:
 
 // --- ZmqAdapter ---
 
+// A simple thread-safe queue for passing egress commands to the worker thread
+template <typename T>
+class ThreadSafeQueue {
+public:
+    void push(T value) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_queue.push(std::move(value));
+        m_cond.notify_one();
+    }
+
+    std::optional<T> try_pop() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_queue.empty()) {
+            return std::nullopt;
+        }
+        T value = std::move(m_queue.front());
+        m_queue.pop();
+        return value;
+    }
+
+private:
+    std::queue<T> m_queue;
+    std::mutex m_mutex;
+    std::condition_variable m_cond; // Not used for try_pop, but good to have
+};
+// --- ZmqAdapter ---
+
+// (Requires the ThreadSafeQueue class from above)
+
 struct ZmqDeviceWorker {
     std::string name;
     std::string endpoint;
-    std::string topic;
+    std::string topic; // Used for SUB filter & PUB topic
+    std::string pattern; // "SUB", "PUB", "PULL", "PUSH", "REQ", "REP", "DEALER", "ROUTER"
+    std::string bind_or_connect; // "bind" or "connect"
+    std::string identity; // For DEALER/ROUTER
+
     std::thread thread;
     std::atomic<bool> should_stop;
     std::string status;
     IProtocolAdapter* adapter;
     zmq::context_t& zmq_context;
-    ZmqDeviceWorker(std::string n, std::string ep, std::string t, IProtocolAdapter* parent, zmq::context_t& ctx)
-        : name(n), endpoint(ep), topic(t), should_stop(false), status("Idle"), adapter(parent), zmq_context(ctx) {
+
+    // Egress queue for HandleCommand -> DevicePollLoop
+    ThreadSafeQueue<std::string> egress_queue;
+
+    ZmqDeviceWorker(std::string n, std::string ep, std::string t, std::string p, std::string boc, std::string id, IProtocolAdapter* parent, zmq::context_t& ctx)
+        : name(n), endpoint(ep), topic(t), pattern(p), bind_or_connect(boc), identity(id),
+        should_stop(false), status("Idle"), adapter(parent), zmq_context(ctx) {
     }
 };
 
@@ -960,6 +1132,7 @@ public:
         : IProtocolAdapter(name, ctx, io_ctx) {
         m_reaper_thread = std::thread(&ZmqAdapter::ReaperLoop, this);
     }
+
     ~ZmqAdapter() {
         {
             std::lock_guard<std::mutex> lock(m_device_mutex);
@@ -977,7 +1150,9 @@ public:
         }
         m_devices.clear();
     }
+
     std::string GetProtocol() override { return "ZMQ"; }
+
     std::map<std::string, std::string> GetDeviceStatuses() override {
         std::map<std::string, std::string> statuses;
         std::lock_guard<std::mutex> lock(m_device_mutex);
@@ -986,18 +1161,29 @@ public:
         }
         return statuses;
     }
+
     bool AddDevice(const std::string& device_name, const DeviceConfig& config) override {
         std::lock_guard<std::mutex> lock(m_device_mutex);
         if (m_devices.count(device_name)) return false;
+
         try {
             std::string endpoint = config.at("endpoint");
-            std::string topic = "";
-            auto it_topic = config.find("topic");
-            if (it_topic != config.end()) topic = it_topic->second;
-            auto worker = std::make_unique<ZmqDeviceWorker>(device_name, endpoint, topic, this, m_zmq_context);
+            std::string pattern = config.at("pattern");
+            std::string bind_or_connect = config.at("bind_or_connect");
+
+            auto getConfigOr = [&](const std::string& key, const std::string& def) {
+                auto it = config.find(key);
+                return (it != config.end()) ? it->second : def;
+                };
+
+            std::string topic = getConfigOr("topic", "");
+            std::string identity = getConfigOr("identity", "");
+
+            auto worker = std::make_unique<ZmqDeviceWorker>(device_name, endpoint, topic, pattern, bind_or_connect, identity, this, m_zmq_context);
             worker->thread = std::thread(&ZmqAdapter::DevicePollLoop, this, worker.get());
             m_devices[device_name] = std::move(worker);
-            AddLog("ZMQ: Added device " + device_name);
+
+            AddLog("ZMQ: Added " + pattern + " device " + device_name);
             return true;
         }
         catch (const std::exception& e) {
@@ -1005,6 +1191,7 @@ public:
             return false;
         }
     }
+
     bool RemoveDevice(const std::string& device_name) override {
         std::unique_ptr<ZmqDeviceWorker> worker_to_reap;
         {
@@ -1022,55 +1209,209 @@ public:
         AddLog("ZMQ: Queued device for removal: " + device_name);
         return true;
     }
+
     bool RestartDevice(const std::string& device_name) override {
         DeviceConfig config;
         {
             std::lock_guard<std::mutex> lock(m_device_mutex);
             auto it = m_devices.find(device_name);
             if (it == m_devices.end()) return false;
+
             config["endpoint"] = it->second->endpoint;
             config["topic"] = it->second->topic;
+            config["pattern"] = it->second->pattern;
+            config["bind_or_connect"] = it->second->bind_or_connect;
+            config["identity"] = it->second->identity;
         }
         RemoveDevice(device_name);
         return AddDevice(device_name, config);
     }
+
     bool IsDeviceActive(const std::string& device_name) override {
         std::lock_guard<std::mutex> lock(m_device_mutex);
         return m_devices.count(device_name);
     }
 
 protected:
+    // --- THIS IS THE NEWLY IMPLEMENTED EGRESS PATH ---
     void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override {
         if (g_log_show_egress) AddLog("ZMQ HandleCommand: " + cmd.dump(), LogType::EGRESS);
+
+        std::lock_guard<std::mutex> lock(m_device_mutex);
+        auto it = m_devices.find(device_name);
+        if (it != m_devices.end()) {
+            // Push the command payload (as a JSON string) to the worker's thread-safe queue
+            it->second->egress_queue.push(cmd.dump());
+        }
     }
+
+    // --- HELPER TO FORMAT AND PUSH INGRESS DATA ---
+    void PushIngressData(ZmqDeviceWorker* worker, const std::string& topic, const std::string& payload) {
+        worker->status = "Msg received on " + topic;
+
+        nlohmann::json j;
+        j["deviceId"] = worker->name;
+        j["adapterName"] = worker->adapter->GetName();
+        j["protocol"] = worker->adapter->GetProtocol();
+        j["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+
+        nlohmann::json parsed_payload;
+        try { parsed_payload = nlohmann::json::parse(payload); }
+        catch (...) { parsed_payload = payload; }
+
+        j["values"][topic] = parsed_payload;
+        PushData(j.dump()); // Push to the central Hub
+    }
+
+    // --- HELPER TO SEND EGRESS DATA FROM THE WORKER THREAD ---
+    void SendEgressData(zmq::socket_t& socket, ZmqDeviceWorker* worker, const std::string& cmd_string) {
+        std::string pattern = worker->pattern;
+
+        if (pattern == "PUB") {
+            socket.send(zmq::const_buffer(worker->topic.c_str(), worker->topic.length()), zmq::send_flags::sndmore);
+            socket.send(zmq::const_buffer(cmd_string.c_str(), cmd_string.length()), zmq::send_flags::none);
+        }
+        else if (pattern == "PUSH" || pattern == "REQ" || pattern == "DEALER" || pattern == "REP") {
+            socket.send(zmq::const_buffer(cmd_string.c_str(), cmd_string.length()), zmq::send_flags::none);
+        }
+        else if (pattern == "ROUTER") {
+            try {
+                // ROUTER commands MUST be a JSON object with "targetIdentity" and "payload"
+                nlohmann::json j_cmd = nlohmann::json::parse(cmd_string);
+                std::string target_id = j_cmd.at("targetIdentity");
+                std::string message = j_cmd.at("payload").dump(); // Re-serialize payload
+
+                socket.send(zmq::const_buffer(target_id.c_str(), target_id.length()), zmq::send_flags::sndmore);
+                socket.send(zmq::message_t(0), zmq::send_flags::sndmore); // Empty delimiter
+                socket.send(zmq::const_buffer(message.c_str(), message.length()), zmq::send_flags::none);
+            }
+            catch (std::exception& e) {
+                worker->status = std::string("ROUTER send error: ") + e.what();
+            }
+        }
+    }
+
+
+    // --- COMPLETELY REWRITTEN DEVICEPOLLLOOP ---
     void DevicePollLoop(ZmqDeviceWorker* worker) {
         try {
-            zmq::socket_t sub_socket(worker->zmq_context, zmq::socket_type::sub);
-            sub_socket.connect(worker->endpoint);
-            sub_socket.set(zmq::sockopt::subscribe, worker->topic);
-            worker->status = "Subscribed to " + worker->endpoint;
+            // --- 1. Create Socket ---
+            zmq::socket_t socket(worker->zmq_context, zmq::socket_type::sub); // default
+            if (worker->pattern == "PUB") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::pub);
+            else if (worker->pattern == "SUB") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::sub);
+            else if (worker->pattern == "PUSH") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::push);
+            else if (worker->pattern == "PULL") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::pull);
+            else if (worker->pattern == "REQ") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::req);
+            else if (worker->pattern == "REP") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::rep);
+            else if (worker->pattern == "DEALER") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::dealer);
+            else if (worker->pattern == "ROUTER") socket = zmq::socket_t(worker->zmq_context, zmq::socket_type::router);
+
+            // --- 2. Set Options ---
+            if (worker->pattern == "SUB") {
+                socket.set(zmq::sockopt::subscribe, worker->topic);
+            }
+            if (worker->pattern == "DEALER" || worker->pattern == "ROUTER") {
+                if (!worker->identity.empty()) {
+                    socket.set(zmq::sockopt::routing_id, worker->identity);
+                }
+            }
+
+            // Set a small receive timeout so the egress queue check is responsive
+            socket.set(zmq::sockopt::rcvtimeo, 10);
+
+            // --- 3. Bind or Connect ---
+            if (worker->bind_or_connect == "bind") {
+                socket.bind(worker->endpoint);
+                worker->status = "Bound to " + worker->endpoint;
+            }
+            else {
+                socket.connect(worker->endpoint);
+                worker->status = "Connected to " + worker->endpoint;
+            }
+
+            // --- 4. Main Poll Loop ---
             while (!worker->should_stop) {
-                zmq::message_t topic_msg, data_msg;
-                std::optional<size_t> topic_size = sub_socket.recv(topic_msg, zmq::recv_flags::dontwait);
-                if (topic_size.has_value() && topic_size.value() > 0) {
-                    std::optional<size_t> data_size = sub_socket.recv(data_msg, zmq::recv_flags::none);
-                    if (data_size.has_value() && data_size.value() > 0) {
-                        std::string topic = topic_msg.to_string();
-                        std::string payload = data_msg.to_string();
-                        worker->status = "Msg received on " + topic;
-                        nlohmann::json j;
-                        j["deviceId"] = worker->name;
-                        j["adapterName"] = worker->adapter->GetName();
-                        j["protocol"] = worker->adapter->GetProtocol();
-                        j["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                        nlohmann::json parsed_payload;
-                        try { parsed_payload = nlohmann::json::parse(payload); }
-                        catch (...) { parsed_payload = payload; }
-                        j["values"][topic] = parsed_payload;
-                        static_cast<ZmqAdapter*>(worker->adapter)->PushData(j.dump());
+
+                // --- A: Check for Ingress Data (Device -> Hub) ---
+                // These patterns can receive data
+                if (worker->pattern == "SUB" || worker->pattern == "PULL" || worker->pattern == "REP" ||
+                    worker->pattern == "DEALER" || worker->pattern == "ROUTER" || worker->pattern == "REQ")
+                {
+                    // REQ sockets block after send, so skip non-blocking recv
+                    if (worker->pattern != "REQ") {
+                        zmq::message_t topic_msg, data_msg, id_msg, empty_msg;
+
+                        // Poll for non-blocking receive
+                        std::optional<size_t> rcv_size;
+                        if (worker->pattern == "ROUTER") rcv_size = socket.recv(id_msg, zmq::recv_flags::dontwait);
+                        else rcv_size = socket.recv(topic_msg, zmq::recv_flags::dontwait);
+
+                        if (rcv_size.has_value()) {
+                            std::string topic, payload, identity;
+
+                            if (worker->pattern == "SUB") {
+                                socket.recv(data_msg, zmq::recv_flags::none); // Block for 2nd part
+                                topic = topic_msg.to_string();
+                                payload = data_msg.to_string();
+                            }
+                            else if (worker->pattern == "PULL" || worker->pattern == "REP" || worker->pattern == "DEALER") {
+                                topic = worker->name; // No topic, use device name
+                                payload = topic_msg.to_string();
+                            }
+                            else if (worker->pattern == "ROUTER") {
+                                socket.recv(empty_msg, zmq::recv_flags::none); // Block for empty
+                                socket.recv(data_msg, zmq::recv_flags::none);  // Block for payload
+                                identity = id_msg.to_string();
+                                topic = identity; // Use identity as topic
+                                payload = data_msg.to_string();
+                            }
+
+                            PushIngressData(worker, topic, payload);
+
+                            // REP socket *must* send a reply
+                            if (worker->pattern == "REP") {
+                                // Check for a queued command to send as reply
+                                auto cmd = worker->egress_queue.try_pop();
+                                if (cmd.has_value()) {
+                                    SendEgressData(socket, worker, *cmd);
+                                }
+                                else {
+                                    socket.send(zmq::str_buffer("ACK"), zmq::send_flags::none); // Send default ACK
+                                }
+                            }
+                        }
                     }
                 }
-                else {
+
+                // --- B: Check for Egress Data (Hub -> Device) ---
+                // These patterns can send data
+                if (worker->pattern == "PUB" || worker->pattern == "PUSH" || worker->pattern == "REQ" ||
+                    worker->pattern == "DEALER" || worker->pattern == "ROUTER" || worker->pattern == "REP")
+                {
+                    // Don't pop queue for REP, it's handled above on receive
+                    if (worker->pattern != "REP") {
+                        auto cmd_str = worker->egress_queue.try_pop();
+                        if (cmd_str.has_value()) {
+                            SendEgressData(socket, worker, *cmd_str);
+
+                            // REQ socket *must* wait for a reply
+                            if (worker->pattern == "REQ") {
+                                zmq::message_t reply_msg;
+                                if (socket.recv(reply_msg, zmq::recv_flags::none)) {
+                                    PushIngressData(worker, worker->name + "_reply", reply_msg.to_string());
+                                }
+                                else {
+                                    worker->status = "Error: REQ no reply";
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If a pattern does nothing in the loop (e.g. pure PUB/PUSH)
+                // this sleep_for will prevent 100% CPU use.
+                // For SUB/PULL etc. this is just a small delay.
+                if (worker->pattern == "PUB" || worker->pattern == "PUSH") {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             }
@@ -1080,6 +1421,8 @@ protected:
         }
         worker->status = "Stopped";
     }
+
+    // --- REAPER (Unchanged) ---
     std::thread m_reaper_thread;
     std::mutex m_reaper_mutex;
     std::vector<std::unique_ptr<ZmqDeviceWorker>> m_reaper_queue;
@@ -1097,10 +1440,10 @@ protected:
                 m_reaper_queue.end());
         }
     }
+
     std::map<std::string, std::unique_ptr<ZmqDeviceWorker>> m_devices;
     std::mutex m_device_mutex;
 };
-
 
 // --- GatewayHub (V3 REFECTOR) ---
 class GatewayHub {
@@ -1979,11 +2322,30 @@ void DrawGatewayUI(GatewayHub& hub) {
                     static int dev_port_int = 502;
                     static char dev_opcua_ep_buf[256] = "opc.tcp://127.0.0.1:4840";
                     static char dev_opcua_nodes_buf[256] = "ns=1;s=MyVariable";
-                    static char dev_mqtt_broker_buf[256] = "tcp://test.mosquitto.org:1883";
+                    static char dev_mqtt_broker_buf[256] = "tcp://broker.hivemq.com:1883";
                     static char dev_mqtt_sub_topics_buf[256] = "gateway/data/#";
                     static char dev_mqtt_cmd_topic_buf[256] = "gateway/commands";
+                    static char dev_mqtt_client_id_buf[128] = "";
+                    static char dev_mqtt_user_buf[128] = "";
+                    static char dev_mqtt_pass_buf[128] = "";
+                    static bool dev_mqtt_clean_sess_bool = true;
+                    static int dev_mqtt_keep_alive_int = 60;
+                    static int dev_mqtt_sub_qos_int = 1;
+                    static char dev_mqtt_lwt_topic_buf[256] = "";
+                    static char dev_mqtt_lwt_payload_buf[256] = "";
+                    static int dev_mqtt_lwt_qos_int = 1;
+                    static bool dev_mqtt_lwt_retain_bool = false;
+                    static bool dev_mqtt_tls_bool = false;
+                    static char dev_mqtt_ca_buf[256] = "";
+                    static char dev_mqtt_cert_buf[256] = "";
+                    static char dev_mqtt_key_buf[256] = "";
                     static char dev_zmq_ep_buf[256] = "tcp://127.0.0.1:5555";
                     static char dev_zmq_topic_buf[256] = "gateway_data";
+                    static const char* zmq_patterns[] = { "SUB", "PUB", "PULL", "PUSH", "REQ", "REP", "DEALER", "ROUTER" };
+                    static int zmq_pattern_idx = 0;
+                    static const char* zmq_boc[] = { "connect", "bind" };
+                    static int zmq_boc_idx = 0;
+                    static char dev_zmq_id_buf[256] = "";
                     ImGui::InputText("Device Name##DevName", dev_name_buf, IM_ARRAYSIZE(dev_name_buf));
                     if (protocol == "ModbusTCP") {
                         ImGui::InputText("IP Address##DevIP", dev_ip_buf, IM_ARRAYSIZE(dev_ip_buf));
@@ -1994,20 +2356,103 @@ void DrawGatewayUI(GatewayHub& hub) {
                         ImGui::InputText("NodeIDs (comma-sep)##DevOpcuaNodes", dev_opcua_nodes_buf, IM_ARRAYSIZE(dev_opcua_nodes_buf));
                     }
                     else if (protocol == "MQTT") {
+                        ImGui::SeparatorText("Connection (Required)");
                         ImGui::InputText("Broker URI##DevMqttBroker", dev_mqtt_broker_buf, IM_ARRAYSIZE(dev_mqtt_broker_buf));
                         ImGui::InputText("Subscribe Topics##DevMqttSub", dev_mqtt_sub_topics_buf, IM_ARRAYSIZE(dev_mqtt_sub_topics_buf));
+
+                        ImGui::SeparatorText("Identity & Authentication");
+                        ImGui::InputText("Client ID##DevMqttClient", dev_mqtt_client_id_buf, IM_ARRAYSIZE(dev_mqtt_client_id_buf));
+                        ImGui::SameLine(); ImGui::TextDisabled("(Optional)");
+                        ImGui::InputText("Username##DevMqttUser", dev_mqtt_user_buf, IM_ARRAYSIZE(dev_mqtt_user_buf));
+                        ImGui::InputText("Password##DevMqttPass", dev_mqtt_pass_buf, IM_ARRAYSIZE(dev_mqtt_pass_buf), ImGuiInputTextFlags_Password);
                         ImGui::InputText("Command Topic##DevMqttCmd", dev_mqtt_cmd_topic_buf, IM_ARRAYSIZE(dev_mqtt_cmd_topic_buf));
+
+                        ImGui::SeparatorText("Session & Keep-Alive");
+                        ImGui::Checkbox("Clean Session##DevMqttClean", &dev_mqtt_clean_sess_bool);
+
+                        ImGui::PushItemWidth(100);
+                        ImGui::InputInt("Keep Alive (s)##DevMqttKeepAlive", &dev_mqtt_keep_alive_int);
+                        if (dev_mqtt_keep_alive_int < 0) dev_mqtt_keep_alive_int = 0;
+                        ImGui::SameLine();
+                        ImGui::InputInt("Subscribe QoS##DevMqttSubQoS", &dev_mqtt_sub_qos_int);
+                        if (dev_mqtt_sub_qos_int < 0) dev_mqtt_sub_qos_int = 0;
+                        if (dev_mqtt_sub_qos_int > 2) dev_mqtt_sub_qos_int = 2;
+                        ImGui::PopItemWidth();
+
+                        ImGui::SeparatorText("Last Will & Testament (LWT)");
+                        ImGui::InputText("LWT Topic##DevMqttLWTTopic", dev_mqtt_lwt_topic_buf, IM_ARRAYSIZE(dev_mqtt_lwt_topic_buf));
+                        ImGui::InputText("LWT Payload##DevMqttLWTPayload", dev_mqtt_lwt_payload_buf, IM_ARRAYSIZE(dev_mqtt_lwt_payload_buf));
+                        ImGui::PushItemWidth(100);
+                        ImGui::InputInt("LWT QoS##DevMqttLWTQoS", &dev_mqtt_lwt_qos_int);
+                        if (dev_mqtt_lwt_qos_int < 0) dev_mqtt_lwt_qos_int = 0;
+                        if (dev_mqtt_lwt_qos_int > 2) dev_mqtt_lwt_qos_int = 2;
+                        ImGui::PopItemWidth();
+                        ImGui::SameLine();
+                        ImGui::Checkbox("LWT Retain##DevMqttLWTRetain", &dev_mqtt_lwt_retain_bool);
+
+                        ImGui::SeparatorText("Security (TLS)");
+                        ImGui::Checkbox("Use TLS##DevMqttTLS", &dev_mqtt_tls_bool);
+                        if (dev_mqtt_tls_bool) {
+                            ImGui::InputText("CA File Path##DevMqttCA", dev_mqtt_ca_buf, IM_ARRAYSIZE(dev_mqtt_ca_buf));
+                            ImGui::InputText("Cert File Path##DevMqttCert", dev_mqtt_cert_buf, IM_ARRAYSIZE(dev_mqtt_cert_buf));
+                            ImGui::InputText("Key File Path##DevMqttKey", dev_mqtt_key_buf, IM_ARRAYSIZE(dev_mqtt_key_buf));
+                        }
                     }
                     else if (protocol == "ZMQ") {
+                        ImGui::SeparatorText("ZMQ Configuration");
+                        ImGui::Combo("Pattern", &zmq_pattern_idx, zmq_patterns, IM_ARRAYSIZE(zmq_patterns));
+                        ImGui::Combo("Topology", &zmq_boc_idx, zmq_boc, IM_ARRAYSIZE(zmq_boc));
                         ImGui::InputText("Endpoint##DevEP", dev_zmq_ep_buf, IM_ARRAYSIZE(dev_zmq_ep_buf));
-                        ImGui::InputText("Topic##DevTopic", dev_zmq_topic_buf, IM_ARRAYSIZE(dev_zmq_topic_buf));
+
+                        const char* pattern = zmq_patterns[zmq_pattern_idx];
+
+                        // Only show Topic for SUB (filter) and PUB (topic)
+                        if (strcmp(pattern, "SUB") == 0 || strcmp(pattern, "PUB") == 0) {
+                            ImGui::InputText("Topic/Filter##DevTopic", dev_zmq_topic_buf, IM_ARRAYSIZE(dev_zmq_topic_buf));
+                        }
+
+                        // Only show Identity for DEALER and ROUTER
+                        if (strcmp(pattern, "DEALER") == 0 || strcmp(pattern, "ROUTER") == 0) {
+                            ImGui::InputText("Identity##DevIdentity", dev_zmq_id_buf, IM_ARRAYSIZE(dev_zmq_id_buf));
+                            ImGui::SameLine(); ImGui::TextDisabled("(Optional for DEALER)");
+                        }
                     }
                     if (ImGui::Button("Add Device")) {
                         DeviceConfig config;
                         if (protocol == "ModbusTCP") { config["ip"] = dev_ip_buf; config["port"] = std::to_string(dev_port_int); }
                         else if (protocol == "OPC-UA") { config["endpoint"] = dev_opcua_ep_buf; config["nodeIds"] = dev_opcua_nodes_buf; }
-                        else if (protocol == "MQTT") { config["brokerUri"] = dev_mqtt_broker_buf; config["subscribeTopics"] = dev_mqtt_sub_topics_buf; config["commandTopic"] = dev_mqtt_cmd_topic_buf; }
-                        else if (protocol == "ZMQ") { config["endpoint"] = dev_zmq_ep_buf; config["topic"] = dev_zmq_topic_buf; }
+                        else if (protocol == "MQTT") {
+                            // --- Required ---
+                            config["brokerUri"] = dev_mqtt_broker_buf;
+                            config["subscribeTopics"] = dev_mqtt_sub_topics_buf;
+
+                            // --- Add all new fields to the config map ---
+                            config["commandTopic"] = dev_mqtt_cmd_topic_buf;
+                            config["clientId"] = dev_mqtt_client_id_buf;
+                            config["username"] = dev_mqtt_user_buf;
+                            config["password"] = dev_mqtt_pass_buf;
+
+                            config["cleanSession"] = dev_mqtt_clean_sess_bool ? "true" : "false";
+                            config["keepAlive"] = std::to_string(dev_mqtt_keep_alive_int);
+                            config["subscribeQos"] = std::to_string(dev_mqtt_sub_qos_int);
+
+                            config["lwtTopic"] = dev_mqtt_lwt_topic_buf;
+                            config["lwtPayload"] = dev_mqtt_lwt_payload_buf;
+                            config["lwtQos"] = std::to_string(dev_mqtt_lwt_qos_int);
+                            config["lwtRetain"] = dev_mqtt_lwt_retain_bool ? "true" : "false";
+
+                            config["useTls"] = dev_mqtt_tls_bool ? "true" : "false";
+                            config["caFile"] = dev_mqtt_ca_buf;
+                            config["certFile"] = dev_mqtt_cert_buf;
+                            config["keyFile"] = dev_mqtt_key_buf;
+                        }
+                        else if (protocol == "ZMQ") {
+                            config["endpoint"] = dev_zmq_ep_buf;
+                            config["pattern"] = zmq_patterns[zmq_pattern_idx];
+                            config["bind_or_connect"] = zmq_boc[zmq_boc_idx];
+                            config["topic"] = dev_zmq_topic_buf;
+                            config["identity"] = dev_zmq_id_buf;
+                        }
                         hub.AddDeviceToAdapter(selected_adapter_name, dev_name_buf, config);
                     }
                     ImGui::Separator();
@@ -2174,4 +2619,3 @@ int main(int, char**) {
 
     return 0;
 }
-

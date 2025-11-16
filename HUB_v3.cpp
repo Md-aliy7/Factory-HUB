@@ -1,5 +1,5 @@
 /*
- * Multiprotocol Gateway Hub (V3 - ZMQ Proxy Architecture)
+ * Multiprotocol Gateway Hub (V3 - fully cross-platform for Windows, Linux, and macOS)
  *
  * Architecture (Decoupled PUB/SUB):
  * 1. Main Thread: Runs Dear ImGui loop.
@@ -2619,3 +2619,4 @@ int main(int, char**) {
 
     return 0;
 }
+

@@ -227,8 +227,3 @@ All other libraries are found via `find_package(...)` in `CMakeLists.txt`:
 | **libmodbus**     | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`.               |
 | **open62541**     | OPC-UA communication stack; used in `OpcuaAdapter`.                     |
 
----
-
-If you want, I can also **add a clean “Quick Start” section with 1–2 command blocks** that combines Windows and Linux setup for even faster onboarding.
-
-Do you want me to do that?

@@ -62,7 +62,7 @@
 #include "backends/imgui_impl_opengl3.h"
 
 #include "GatewayUI.h"
-#include "GatewayHub.h".
+#include "GatewayHub.h"
 
 // =================================================================================
 //
@@ -146,4 +146,5 @@ int main(int, char**) {
 
     return 0;
 }
+
 

@@ -81,6 +81,9 @@ struct Notification {
     std::string message;
     double expiry_time;
     bool is_success;
+    
+    Notification(const std::string& msg, double expiry, bool success)
+        : message(msg), expiry_time(expiry), is_success(success) {}
 };
 
 extern std::vector<Notification> g_notifications;

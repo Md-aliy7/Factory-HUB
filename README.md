@@ -69,95 +69,184 @@ The `IProtocolAdapter` defines a *service manager* responsible for a group of de
 
 ---
 
-# 🛠️ Report: Dependencies & Building Guide
+# 📚 Dependencies & Building Guide
 
-## 🚧 How to Build Your Project
+This project uses **vcpkg** for dependency management. Follow the steps below to install vcpkg, install required libraries, and build the project.
 
-With the provided `CMakeLists.txt` in your project root, any developer can build the project using the following steps:
+---
 
-### **Bash**
+## 🚀 Install vcpkg
+
+Before building the project, install **vcpkg** and set it up (one-time setup).
+
+### 1. Clone and bootstrap vcpkg
+
+Choose a permanent location for vcpkg (e.g., `C:\dev\vcpkg` or `~/vcpkg`).
 
 ```bash
-# 1. Create a build directory (out-of-source build)
+# Clone the vcpkg repository
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+```
+
+#### Windows (PowerShell or CMD)
+
+```bash
+.\bootstrap-vcpkg.bat
+```
+
+#### Linux
+
+```bash
+./bootstrap-vcpkg.sh
+```
+
+---
+
+### 2. (Recommended) Set Environment Variables
+
+Add the vcpkg directory to your `PATH`, and create a new variable:
+
+* **VCPKG_ROOT** → path to your vcpkg install
+  Example: `C:\dev\vcpkg` or `~/vcpkg`
+
+This makes the toolchain file easy for CMake to find.
+
+---
+
+## 🚧 Build the Project (Using vcpkg)
+
+### **Step 1 — Install project dependencies**
+
+Run from the vcpkg directory:
+
+#### Windows
+
+```bash
+.\vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541
+```
+
+#### Linux
+
+```bash
+./vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541
+```
+
+This may take several minutes as libraries download and compile.
+
+---
+
+### **Step 2 — Configure the project with CMake**
+
+Create a build directory in your project:
+
+```bash
+cd /path/to/Factory-HUB
 mkdir build
 cd build
+```
 
-# 2. Configure the project (CMake downloads all dependencies)
+#### Windows (Visual Studio 2022)
 
-# On Windows (e.g., Visual Studio 2022)
-cmake .. -G "Visual Studio 17 2022"
+```bash
+cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake
+```
 
-# On Linux
-cmake ..
+#### Linux
 
-# 3. Build the project
+```bash
+cmake .. -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+```
 
-# On Windows (via CMake)
+---
+
+### **Step 3 — Build the project**
+
+#### Windows (Release build)
+
+```bash
 cmake --build . --config Release
+```
 
-# On Linux
+#### Linux
+
+```bash
 cmake --build .
-# or simply:
+# or:
 make
 ```
+
+Your executable will be located in:
+
+* **Windows:** `build/Release/FactoryHub.exe`
+* **Linux:** `build/FactoryHub`
 
 ---
 
 ## 📦 Dependency Analysis
 
-Your project integrates several powerful libraries. Here's how each dependency is managed and used.
+The project uses a combination of **local/manual dependencies** and **vcpkg-managed dependencies**.
 
 ---
 
-### **1. Local Dependency (Manually Managed)**
+### ### 1. Local Dependency (Manual Build)
 
-#### **ImGui** (including `imgui_impl_glfw`, `imgui_impl_opengl3`)
+#### **ImGui**
 
-* **Purpose:** Provides the complete graphical user interface (GUI).
-* **Build Method:**
+Includes:
 
-  * Managed manually (not through CPM).
-  * Included via:
+* `imgui_impl_glfw`
+* `imgui_impl_opengl3`
 
-    ```cmake
-    add_subdirectory(imgui)
-    ```
-  * CMake loads `imgui/CMakeLists.txt` and builds it as part of the project.
+**Purpose:** Core GUI rendering system.
+**Build:** Included manually via:
+
+```
+add_subdirectory(imgui)
+```
+
+CMake builds ImGui from `imgui/CMakeLists.txt`.
 
 ---
 
-### **2. CPM-Managed Dependencies (Automatically Downloaded by CMake)**
+### 2. vcpkg-Managed Dependencies
 
-Using `CPMAddPackage`, CMake fetches specific versions directly from GitHub—no system installs required.
+All other libraries are resolved automatically through:
 
-#### **glfw**
+```cmake
+find_package(...)
+```
 
-* **Purpose:** Creates the OS window, handles input, and initializes the OpenGL context for ImGui.
+#### **glfw3**
+
+* Window creation & input handling
+* Creates OpenGL context for ImGui
 
 #### **glew**
 
-* **Purpose:** Loads modern OpenGL functions; required by the ImGui OpenGL3 backend.
+* Loads modern OpenGL functions
+* Required by ImGui’s OpenGL3 backend
 
 #### **nlohmann_json**
 
-* **Purpose:** JSON parsing/serialization (e.g., `SendTestCommand`).
-* **Type:** Header-only.
+* JSON serialization
+* Header-only
 
-#### **libzmq (ZeroMQ)**
+#### **zeromq**
 
-* **Purpose:** High-performance PUB/SUB messaging (e.g., `inproc://data_ingress`).
+* High-performance pub/sub messaging
+* Used for `inproc://data_ingress`
 
 #### **paho-mqtt-c**
 
-* **Purpose:** Eclipse Paho MQTT C client for broker communication.
+* MQTT client library
 
 #### **libmodbus**
 
-* **Purpose:** Modbus TCP/RTU communication used in `ModbusTCPAdapter`.
+* Modbus TCP/RTU communication
+* Used in `ModbusTCPAdapter`
 
 #### **open62541**
 
-* **Purpose:** OPC-UA implementation used by your `OpcuaAdapter`.
-* **Build Options:**
-
-  * `UA_ENABLE_AMALGAMATION ON` for a single generated C file.
+* OPC-UA communication stack
+* Used in `OpcuaAdapter`

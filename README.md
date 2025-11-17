@@ -404,7 +404,7 @@ mkdir build && cd build && cmake .. -G "Visual Studio 17 2022" -A x64 && cmake -
 
 - Ensure all system dependencies are installed
 - Try cleaning the build directory: `rm -rf build && mkdir build`
-- Check that your compiler supports C++17
+- Check that your compiler supports C++20
 
 **If dependencies fail to download:**
 

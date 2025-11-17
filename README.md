@@ -67,38 +67,97 @@ The `IProtocolAdapter` defines a *service manager* responsible for a group of de
 | **Polling** (e.g., Modbus, OPC-UA) | **Asynchronous / Task-Based** | Uses `boost::asio::steady_timer` to schedule poll intervals. The *blocking* I/O operation is posted as a task to the **Asio Thread Pool**. **No dedicated threads** are created by the adapter. | **Boost.Asio** |
 | **Event-Based** (e.g., MQTT, ZMQ) | **Thread-Per-Device** | Uses a dedicated worker thread (`std::thread`) per device/connection. This thread blocks efficiently on network events (e.g., `recv` or message callbacks), which is a scalable approach for event-driven protocols. | C++ `std::thread` |
 
------
+---
 
-## 🛠️ Dependencies & Building
+# 🛠️ Report: Dependencies & Building Guide
 
-### Dependencies
+## 🚧 How to Build Your Project
 
-This project is built using **CMake** and requires several libraries, preferably managed by a package manager like **vcpkg**.
+With the provided `CMakeLists.txt` in your project root, any developer can build the project using the following steps:
 
-  * **Core:** Boost (Asio, System)
-  * **Messaging:** ZMQ (libzmq, cppzmq), Paho MQTT C
-  * **Web:** uWebSockets (uWS), OpenSSL
-  * **UI:** Dear ImGui, GLFW3, GLEW
-  * **Protocols:** libmodbus, open62541
-  * **Utilities:** nlohmann/json
+### **Bash**
 
-### Build Instructions
+```bash
+# 1. Create a build directory (out-of-source build)
+mkdir build
+cd build
 
-1.  Clone the repository and its submodules (if any):
-    ```bash
-    git clone --recurse-submodules https://github.com/your-username/Hybrid-Gateway-Hub.git
-    cd Hybrid-Gateway-Hub
+# 2. Configure the project (CMake downloads all dependencies)
+
+# On Windows (e.g., Visual Studio 2022)
+cmake .. -G "Visual Studio 17 2022"
+
+# On Linux
+cmake ..
+
+# 3. Build the project
+
+# On Windows (via CMake)
+cmake --build . --config Release
+
+# On Linux
+cmake --build .
+# or simply:
+make
+```
+
+---
+
+## 📦 Dependency Analysis
+
+Your project integrates several powerful libraries. Here's how each dependency is managed and used.
+
+---
+
+### **1. Local Dependency (Manually Managed)**
+
+#### **ImGui** (including `imgui_impl_glfw`, `imgui_impl_opengl3`)
+
+* **Purpose:** Provides the complete graphical user interface (GUI).
+* **Build Method:**
+
+  * Managed manually (not through CPM).
+  * Included via:
+
+    ```cmake
+    add_subdirectory(imgui)
     ```
-2.  Install dependencies (e.g., using vcpkg):
-    ```bash
-    vcpkg install boost-asio zmq cppzmq uwebsockets paho-mqtt-c libmodbus open62541 nlohmann-json glfw3 glew
-    ```
-3.  Configure and build with CMake:
-    ```bash
-    cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=[path-to-vcpkg]/scripts/buildsystems/vcpkg.cmake
-    cmake --build build --config Release
-    ```
-4.  Run the application:
-    ```bash
-    ./build/Release/HybridGatewayHub
-    ```
+  * CMake loads `imgui/CMakeLists.txt` and builds it as part of the project.
+
+---
+
+### **2. CPM-Managed Dependencies (Automatically Downloaded by CMake)**
+
+Using `CPMAddPackage`, CMake fetches specific versions directly from GitHub—no system installs required.
+
+#### **glfw**
+
+* **Purpose:** Creates the OS window, handles input, and initializes the OpenGL context for ImGui.
+
+#### **glew**
+
+* **Purpose:** Loads modern OpenGL functions; required by the ImGui OpenGL3 backend.
+
+#### **nlohmann_json**
+
+* **Purpose:** JSON parsing/serialization (e.g., `SendTestCommand`).
+* **Type:** Header-only.
+
+#### **libzmq (ZeroMQ)**
+
+* **Purpose:** High-performance PUB/SUB messaging (e.g., `inproc://data_ingress`).
+
+#### **paho-mqtt-c**
+
+* **Purpose:** Eclipse Paho MQTT C client for broker communication.
+
+#### **libmodbus**
+
+* **Purpose:** Modbus TCP/RTU communication used in `ModbusTCPAdapter`.
+
+#### **open62541**
+
+* **Purpose:** OPC-UA implementation used by your `OpcuaAdapter`.
+* **Build Options:**
+
+  * `UA_ENABLE_AMALGAMATION ON` for a single generated C file.

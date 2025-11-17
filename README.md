@@ -71,8 +71,6 @@ The `IProtocolAdapter` defines a _service manager_ responsible for a group of de
 
 # 📚 Dependencies & Build Guide
 
-This project uses **vcpkg** for C++ dependency management. Visual Studio or your preferred IDE will handle compilation directly — no `CMakeLists.txt` is required.
-
 This project uses **CMake** with **CPM (C++ Package Manager)** to automatically download and build all dependencies. The following libraries are managed automatically:
 
 - **Core:** Boost (Asio, System)
@@ -114,94 +112,189 @@ sudo pacman -S base-devel cmake mesa openssl
 **Windows:**
 
 - CMake 3.20 or higher
-- Visual Studio 2019 or later with C++ support
-- OpenSSL (can be installed via vcpkg or downloaded)
+- Visual Studio 2019 or later with C++ support (MSVC compiler)
+- Git for Windows (for cloning dependencies)
+- OpenSSL development libraries
+- OpenGL support (usually included with graphics drivers)
 
-## 🚀 1. Install vcpkg (One-Time Setup)
+Install using one of these methods:
 
-If you haven't already, install **vcpkg** in a permanent location.
+**Option 1: Using Chocolatey (Recommended)**
 
-### Clone and Bootstrap vcpkg
+```powershell
+# Install Chocolatey first (run PowerShell as Administrator)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
 
-Choose a folder (e.g., `C:\dev\vcpkg` or `~/dev/vcpkg`):
-
-```bash
-# Clone the vcpkg repository
-git clone https://github.com/microsoft/vcpkg.git
-cd vcpkg
+# Install dependencies
+choco install cmake git visualstudio2022buildtools -y
 ```
 
-**Windows (PowerShell/CMD):**
+**Option 2: Manual Installation**
 
-```dos
+1. Download and install [CMake](https://cmake.org/download/) (Windows x64 Installer)
+2. Download and install [Visual Studio 2022](https://visualstudio.microsoft.com/downloads/) with "Desktop development with C++" workload
+3. Download and install [Git for Windows](https://git-scm.com/download/win)
+4. Download OpenSSL from [Win32/Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html) or use vcpkg (see below)
+
+## 🖥️ Building the Project
+
+### Windows Build Instructions
+
+**Method 1: Using Visual Studio (Recommended)**
+
+1. **Open Developer Command Prompt:**
+
+   - Press `Win + X` and select "Developer Command Prompt for VS 2022"
+   - Or open "x64 Native Tools Command Prompt for VS 2022" from Start Menu
+
+2. **Navigate to project directory:**
+
+   ```cmd
+   cd C:\path\to\Factory-HUB
+   ```
+
+3. **Create build directory and configure:**
+
+   ```cmd
+   mkdir build
+   cd build
+   cmake .. -G "Visual Studio 17 2022" -A x64
+   ```
+
+4. **Build the project:**
+
+   ```cmd
+   cmake --build . --config Release
+   ```
+
+5. **Run the application:**
+   ```cmd
+   .\bin\Release\Factory-HUB.exe
+   ```
+
+**Method 2: Using CMake GUI**
+
+1. Open CMake GUI
+2. Set "Where is the source code:" to your project directory
+3. Set "Where to build the binaries:" to `build` subdirectory
+4. Click "Configure" and select "Visual Studio 17 2022" as generator
+5. Click "Generate"
+6. Open the generated `Factory-HUB.sln` in Visual Studio
+7. Build the solution (F7 or Build > Build Solution)
+8. Run from Visual Studio (F5) or find the executable in `build\bin\Release\`
+
+**Method 3: Using PowerShell/Terminal**
+
+```powershell
+# Navigate to project
+cd C:\path\to\Factory-HUB
+
+# Create build directory
+mkdir build
+cd build
+
+# Configure (using Ninja for faster builds, optional)
+cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+
+# Or use Visual Studio generator
+cmake .. -G "Visual Studio 17 2022" -A x64
+
+# Build
+cmake --build . --config Release
+
+# Run
+.\bin\Release\Factory-HUB.exe
+```
+
+**Installing OpenSSL on Windows (if needed):**
+
+If CMake fails to find OpenSSL, you have two options:
+
+**Option A: Using vcpkg (Recommended for Windows)**
+
+```powershell
+# Clone vcpkg (one-time setup)
+git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+cd C:\vcpkg
 .\bootstrap-vcpkg.bat
-```
 
-**Linux (Bash):**
+# Install OpenSSL
+.\vcpkg install openssl:x64-windows
 
-```bash
-./bootstrap-vcpkg.sh
-```
-
-### Integrate with Visual Studio (Windows Only)
-
-This step lets Visual Studio automatically find and use any libraries installed via vcpkg:
-
-```dos
-# Run this from the vcpkg folder
+# Integrate with Visual Studio (optional but recommended)
 .\vcpkg integrate install
+
+# When configuring CMake, specify vcpkg toolchain:
+cmake .. -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
 ```
 
-This avoids manually setting include/lib paths for your dependencies.
+**Option B: Manual OpenSSL Installation**
 
----
+1. Download OpenSSL from [Win32/Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html)
+2. Install to `C:\OpenSSL-Win64` (or your preferred location)
+3. Configure CMake with:
+   ```cmd
+   cmake .. -DOPENSSL_ROOT_DIR=C:\OpenSSL-Win64
+   ```
 
-## 🚧 2. Install Project Dependencies
+### Linux Build Instructions
 
-From your **vcpkg** directory, install all required libraries:
+1. **Install system dependencies** (if not already installed):
 
 ```bash
-# Windows
-.\vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 boost-asio uwebsockets --triplet=x64-windows
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y build-essential cmake libgl1-mesa-dev libssl-dev libmodbus-dev libglew-dev
 
-# Linux
-./vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 boost-asio uwebsockets --triplet=x64-linux
+# Arch Linux
+sudo pacman -S base-devel cmake mesa openssl libmodbus glew
 ```
 
----
+2. **Clone the repository:**
 
-## 🖥️ 3. Build the Project
+   ```bash
+   git clone https://github.com/your-username/Factory-HUB.git
+   cd Factory-HUB
+   ```
 
-### Windows (Visual Studio 2022)
+3. **Create build directory and configure:**
 
-1. Open Visual Studio 2022.
-2. Go to `File > Open > Project/Solution` and select your `.sln` or `.vcxproj` file.
-3. Visual Studio will detect vcpkg-managed libraries automatically.
-4. Choose a build configuration (e.g., Release).
-5. Press **F5** or click the green arrow to build and run.
+   ```bash
+   mkdir build
+   cd build
+   cmake ..
+   ```
 
-### Linux (VS Code or Terminal)
+4. **Build the project:**
 
-1. Open the project folder in VS Code or your terminal.
-2. Make sure you have a C++ compiler installed:
+   ```bash
+   cmake --build . -j$(nproc)
+   ```
 
-```bash
-sudo apt update
-sudo apt install build-essential git
-```
+5. **Run the application:**
+   ```bash
+   ./bin/Factory-HUB
+   ```
 
-3. Open your IDE and set the include/lib paths to point to your vcpkg folder if necessary.
-4. Build your project using your IDE or a `makefile` if one exists:
+### macOS Build Instructions
 
-```bash
-g++ -std=c++20 -I/path/to/vcpkg/installed/x64-linux/include *.cpp -L/path/to/vcpkg/installed/x64-linux/lib -lglfw -lglew -lzmq -lpaho-mqtt3c -lmodbus -lopen62541 -lboost_system -luWS -o FactoryHub
-```
+1. **Install dependencies:**
 
-5. Run the executable:
+   ```bash
+   # Install Homebrew if not already installed
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-```bash
-./FactoryHub
-```
+   # Install required packages
+   brew install cmake openssl
+   ```
+
+2. **Build the project:**
+   ```bash
+   mkdir build && cd build
+   cmake .. -DOPENSSL_ROOT_DIR=/usr/local/opt/openssl
+   cmake --build . -j$(sysctl -n hw.ncpu)
+   ./bin/Factory-HUB
+   ```
 
 ---
 
@@ -211,22 +304,24 @@ g++ -std=c++20 -I/path/to/vcpkg/installed/x64-linux/include *.cpp -L/path/to/vcp
 
 **ImGui** (including `imgui_impl_glfw`, `imgui_impl_opengl3`)
 
-* **Purpose:** Core GUI rendering system.
-* **Build:** Included manually in the project source folder.
+- **Purpose:** Core GUI rendering system.
+- **Build:** Included manually in the project source folder.
 
-### 2. vcpkg-Managed Dependencies
+### 2. CPM-Managed Dependencies (Automatically Downloaded & Built)
 
-| Library           | Purpose                                                                 |
-| ----------------- | ----------------------------------------------------------------------- |
-| **glfw3**         | Window creation & input handling; creates the OpenGL context for ImGui. |
-| **glew**          | Loads modern OpenGL functions; required by ImGui’s OpenGL3 backend.     |
-| **nlohmann_json** | JSON serialization (Header-only).                                       |
-| **zeromq**        | High-performance pub/sub messaging; used for `inproc://data_ingress`.   |
-| **paho-mqtt-c**   | MQTT client library.                                                    |
-| **libmodbus**     | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`.               |
-| **open62541**     | OPC-UA communication stack; used in `OpcuaAdapter`.                     |
-| **boost-asio**    | Asynchronous networking & I/O operations.                               |
-| **uWebSockets**   | High-performance WebSocket server/client library.                       |
+| Library           | Purpose                                                                 | Notes                              |
+| ----------------- | ----------------------------------------------------------------------- | ---------------------------------- |
+| **glfw3**         | Window creation & input handling; creates the OpenGL context for ImGui. | Built from source via CPM          |
+| **glew**          | Loads modern OpenGL functions; required by ImGui's OpenGL3 backend.     | Uses system library if available   |
+| **nlohmann_json** | JSON serialization (Header-only).                                       | Header-only, no compilation needed |
+| **zeromq**        | High-performance pub/sub messaging; used for `inproc://data_ingress`.   | Built from source via CPM          |
+| **paho-mqtt-c**   | MQTT client library.                                                    | Built from source via CPM          |
+| **libmodbus**     | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`.               | Uses system library if available   |
+| **open62541**     | OPC-UA communication stack; used in `OpcuaAdapter`.                     | Built from source via CPM          |
+| **boost-asio**    | Asynchronous networking & I/O operations.                               | Built from source via CPM          |
+| **uWebSockets**   | High-performance WebSocket server/client library.                       | Built from source via CPM          |
+| **zlib**          | Compression library (required by uWebSockets).                          | Built from source via CPM          |
+| **uSockets**      | Low-level socket library (required by uWebSockets).                     | Built from uWebSockets submodule   |
 
 1. **Clone the repository:**
 
@@ -261,23 +356,49 @@ g++ -std=c++20 -I/path/to/vcpkg/installed/x64-linux/include *.cpp -L/path/to/vcp
    # Linux/macOS
    ./bin/Factory-HUB
 
-   # Windows
+   # Windows (Command Prompt)
+   .\bin\Release\Factory-HUB.exe
+
+   # Windows (PowerShell)
    .\bin\Release\Factory-HUB.exe
    ```
 
 ### Quick Build (One-liner)
 
+**Linux/macOS:**
+
 ```bash
 mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc) && ./bin/Factory-HUB
+```
+
+**Windows (PowerShell):**
+
+```powershell
+mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" -A x64; cmake --build . --config Release; .\bin\Release\Factory-HUB.exe
+```
+
+**Windows (Command Prompt):**
+
+```cmd
+mkdir build && cd build && cmake .. -G "Visual Studio 17 2022" -A x64 && cmake --build . --config Release && .\bin\Release\Factory-HUB.exe
 ```
 
 ### Troubleshooting
 
 **If CMake fails to find OpenSSL:**
 
-- Linux: Install `libssl-dev` (Ubuntu/Debian) or `openssl` (Arch)
-- macOS: `brew install openssl` then set `-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl`
-- Windows: Install OpenSSL via vcpkg or download from https://slproweb.com/products/Win32OpenSSL.html
+- **Linux:** Install `libssl-dev` (Ubuntu/Debian) or `openssl` (Arch)
+- **macOS:** `brew install openssl` then set `-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl`
+- **Windows:**
+  - Install via vcpkg: `.\vcpkg install openssl:x64-windows` and use `-DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake`
+  - Or download from [Win32/Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html) and set `-DOPENSSL_ROOT_DIR=C:\OpenSSL-Win64`
+
+**Windows-specific issues:**
+
+- **"CMake Error: Could not find CMAKE_ROOT"**: Make sure CMake is installed and added to PATH, or use full path to cmake.exe
+- **"LNK1104: cannot open file 'libmodbus.lib'"**: Install libmodbus via vcpkg or ensure system libraries are available
+- **"Cannot open include file: 'GL/glew.h'"**: Install GLEW via vcpkg or ensure OpenGL development libraries are installed
+- **Build errors with uSockets**: The uSockets library is built automatically from the uWebSockets submodule. If it fails, ensure you have a C compiler (cl.exe) available in your PATH
 
 **If build fails with linking errors:**
 
@@ -289,4 +410,12 @@ mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc) && ./bin/Fa
 
 - Check your internet connection
 - Some dependencies are large (Boost, uWebSockets) - first build may take 10-20 minutes
-- You can use a local cache by setting `CPM_SOURCE_CACHE` environment variable
+- You can use a local cache by setting `CPM_SOURCE_CACHE` environment variable:
+  - **Windows:** `set CPM_SOURCE_CACHE=C:\path\to\cache` (Command Prompt) or `$env:CPM_SOURCE_CACHE="C:\path\to\cache"` (PowerShell)
+  - **Linux/macOS:** `export CPM_SOURCE_CACHE=/path/to/cache`
+
+**Windows firewall/antivirus:**
+
+- Some antivirus software may interfere with downloading dependencies
+- If downloads fail, temporarily disable antivirus or add CMake build directory to exclusions
+- Windows Defender may need to allow CMake and Git through the firewall

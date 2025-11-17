@@ -154,7 +154,7 @@ sudo apt install build-essential git
 4. Build your project using your IDE or a `makefile` if one exists:
 
 ```bash
-g++ -std=c++17 -I/path/to/vcpkg/installed/x64-linux/include *.cpp -L/path/to/vcpkg/installed/x64-linux/lib -lglfw -lglew -lzmq -lpaho-mqtt3c -lmodbus -lopen62541 -lboost_system -luWS -o FactoryHub
+g++ -std=c++20 -I/path/to/vcpkg/installed/x64-linux/include *.cpp -L/path/to/vcpkg/installed/x64-linux/lib -lglfw -lglew -lzmq -lpaho-mqtt3c -lmodbus -lopen62541 -lboost_system -luWS -o FactoryHub
 ```
 
 5. Run the executable:

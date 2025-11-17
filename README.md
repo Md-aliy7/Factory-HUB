@@ -69,13 +69,9 @@ The `IProtocolAdapter` defines a *service manager* responsible for a group of de
 
 ---
 
-Here’s a clean, well-formatted **README-style version** of your content in repo format with headings, code blocks, and emoji for readability:
-
----
-
 # 📚 Dependencies & Build Guide
 
-This project uses **vcpkg** for C++ dependency management and **CMake** as its build system. The `CMakeLists.txt` file in the project root tells Visual Studio and other tools how to build the code.
+This project uses **vcpkg** for C++ dependency management. Visual Studio or your preferred IDE will handle compilation directly — no `CMakeLists.txt` is required.
 
 Follow the instructions below to set up vcpkg and build the project.
 
@@ -109,113 +105,76 @@ cd vcpkg
 
 ### Integrate with Visual Studio (Windows Only)
 
-This allows Visual Studio 2022 to automatically find and use any libraries installed via vcpkg:
+This step lets Visual Studio automatically find and use any libraries installed via vcpkg:
 
 ```dos
 # Run this from the vcpkg folder
 .\vcpkg integrate install
 ```
 
-This avoids manually passing the `CMAKE_TOOLCHAIN_FILE` path to Visual Studio.
+This avoids manually setting include/lib paths for your dependencies.
 
 ---
 
-## 🚧 2. Build the Project (Windows & Linux)
+## 🚧 2. Install Project Dependencies
 
-### 🖥️ Path A: Windows with Visual Studio 2022 (Recommended)
+From your **vcpkg** directory, install all required libraries:
 
-#### Install Project Dependencies
+```bash
+# Windows
+.\vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 boost-asio uwebsockets --triplet=x64-windows
 
-Open PowerShell or CMD from your vcpkg directory:
-
-```dos
-# Note: The package name is 'zeromq', not 'libzmq'
-.\vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 --triplet=x64-windows
+# Linux
+./vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 boost-asio uwebsockets --triplet=x64-linux
 ```
 
-#### Open the Project in Visual Studio
-
-1. Start Visual Studio 2022.
-2. Go to `File > Open > Folder...`
-3. Select your project's root folder (e.g., `D:\trial\Factory-HUB-main`).
-
-#### Configure and Build
-
-* Visual Studio reads the `CMakeLists.txt` file automatically.
-* Installed vcpkg packages are detected automatically.
-* The "Output" window will show: `"CMake configuration finished."`
-* Select the build type (e.g., Release) from the toolbar.
-* Select the "Startup Item" `FactoryHub.exe`.
-* Press the green "Run" arrow (or F5) to build, run, and debug.
-
-Alternatively, right-click `CMakeLists.txt` in Solution Explorer and select **Build**.
-
 ---
 
-### 🐧 Path B: Linux with VS Code (Recommended)
+## 🖥️ 3. Build the Project
 
-#### Install Build Tools
+### Windows (Visual Studio 2022)
+
+1. Open Visual Studio 2022.
+2. Go to `File > Open > Project/Solution` and select your `.sln` or `.vcxproj` file.
+3. Visual Studio will detect vcpkg-managed libraries automatically.
+4. Choose a build configuration (e.g., Release).
+5. Press **F5** or click the green arrow to build and run.
+
+### Linux (VS Code or Terminal)
+
+1. Open the project folder in VS Code or your terminal.
+2. Make sure you have a C++ compiler installed:
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake git
+sudo apt install build-essential git
 ```
 
-#### Install Project Dependencies
-
-From your vcpkg directory:
+3. Open your IDE and set the include/lib paths to point to your vcpkg folder if necessary.
+4. Build your project using your IDE or a `makefile` if one exists:
 
 ```bash
-# Note: The package name is 'zeromq', not 'libzmq'
-./vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 --triplet=x64-linux
+g++ -std=c++17 -I/path/to/vcpkg/installed/x64-linux/include *.cpp -L/path/to/vcpkg/installed/x64-linux/lib -lglfw -lglew -lzmq -lpaho-mqtt3c -lmodbus -lopen62541 -lboost_system -luWS -o FactoryHub
 ```
 
-#### Open Project in VS Code
-
-Install **Visual Studio Code** and the following extensions:
-
-* **C/C++ Extension Pack**
-* **CMake Tools**
-
-Open your project folder:
+5. Run the executable:
 
 ```bash
-cd /path/to/Factory-HUB
-code .
+./FactoryHub
 ```
-
-#### Configure VS Code
-
-* When prompted by CMake Tools, configure and select a compiler kit (GCC or Clang).
-* If configuration fails due to vcpkg, press `Ctrl+Shift+P` → **Preferences: Open User Settings (JSON)** and add:
-
-```json
-"cmake.configureSettings": {
-    "CMAKE_TOOLCHAIN_FILE": "/home/your-user/dev/vcpkg/scripts/buildsystems/vcpkg.cmake"
-}
-```
-
-* Save the settings file.
-
-#### Build and Run
-
-* Use the **Build** button in the VS Code status bar (or press F7).
-* Click **Run** (or `Ctrl+F5`) to execute `FactoryHub`.
 
 ---
 
-## 📦 3. Dependency Analysis
+## 📦 4. Dependency Analysis
 
-### 1. Local Dependency (Manual Build)
+### 1. Local Dependencies (Manual Build)
 
 **ImGui** (including `imgui_impl_glfw`, `imgui_impl_opengl3`)
 
 * **Purpose:** Core GUI rendering system.
-* **Build:** Included manually via `add_subdirectory(imgui)`. CMake builds ImGui from its own `imgui/CMakeLists.txt`.
+* **Build:** Included manually in the project source folder.
 
 ### 2. vcpkg-Managed Dependencies
-
-All other libraries are found via `find_package(...)` in `CMakeLists.txt`:
 
 | Library           | Purpose                                                                 |
 | ----------------- | ----------------------------------------------------------------------- |
@@ -226,4 +185,6 @@ All other libraries are found via `find_package(...)` in `CMakeLists.txt`:
 | **paho-mqtt-c**   | MQTT client library.                                                    |
 | **libmodbus**     | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`.               |
 | **open62541**     | OPC-UA communication stack; used in `OpcuaAdapter`.                     |
+| **boost-asio**    | Asynchronous networking & I/O operations.                               |
+| **uWebSockets**   | High-performance WebSocket server/client library.                       |
 

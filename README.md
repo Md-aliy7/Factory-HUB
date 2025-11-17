@@ -69,19 +69,25 @@ The `IProtocolAdapter` defines a *service manager* responsible for a group of de
 
 ---
 
-# 📚 Dependencies & Building Guide
-
-This project uses **vcpkg** for dependency management. Follow the steps below to install vcpkg, install required libraries, and build the project.
+Here’s a clean, well-formatted **README-style version** of your content in repo format with headings, code blocks, and emoji for readability:
 
 ---
 
-## 🚀 Install vcpkg
+# 📚 Dependencies & Build Guide
 
-Before building the project, install **vcpkg** and set it up (one-time setup).
+This project uses **vcpkg** for C++ dependency management and **CMake** as its build system. The `CMakeLists.txt` file in the project root tells Visual Studio and other tools how to build the code.
 
-### 1. Clone and bootstrap vcpkg
+Follow the instructions below to set up vcpkg and build the project.
 
-Choose a permanent location for vcpkg (e.g., `C:\dev\vcpkg` or `~/vcpkg`).
+---
+
+## 🚀 1. Install vcpkg (One-Time Setup)
+
+If you haven't already, install **vcpkg** in a permanent location.
+
+### Clone and Bootstrap vcpkg
+
+Choose a folder (e.g., `C:\dev\vcpkg` or `~/dev/vcpkg`):
 
 ```bash
 # Clone the vcpkg repository
@@ -89,164 +95,140 @@ git clone https://github.com/microsoft/vcpkg.git
 cd vcpkg
 ```
 
-#### Windows (PowerShell or CMD)
+**Windows (PowerShell/CMD):**
 
-```bash
+```dos
 .\bootstrap-vcpkg.bat
 ```
 
-#### Linux
+**Linux (Bash):**
 
 ```bash
 ./bootstrap-vcpkg.sh
 ```
 
----
+### Integrate with Visual Studio (Windows Only)
 
-### 2. (Recommended) Set Environment Variables
+This allows Visual Studio 2022 to automatically find and use any libraries installed via vcpkg:
 
-Add the vcpkg directory to your `PATH`, and create a new variable:
-
-* **VCPKG_ROOT** → path to your vcpkg install
-  Example: `C:\dev\vcpkg` or `~/vcpkg`
-
-This makes the toolchain file easy for CMake to find.
-
----
-
-## 🚧 Build the Project (Using vcpkg)
-
-### **Step 1 — Install project dependencies**
-
-Run from the vcpkg directory:
-
-#### Windows
-
-```bash
-.\vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541
+```dos
+# Run this from the vcpkg folder
+.\vcpkg integrate install
 ```
 
-#### Linux
-
-```bash
-./vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541
-```
-
-This may take several minutes as libraries download and compile.
+This avoids manually passing the `CMAKE_TOOLCHAIN_FILE` path to Visual Studio.
 
 ---
 
-### **Step 2 — Configure the project with CMake**
+## 🚧 2. Build the Project (Windows & Linux)
 
-Create a build directory in your project:
+### 🖥️ Path A: Windows with Visual Studio 2022 (Recommended)
+
+#### Install Project Dependencies
+
+Open PowerShell or CMD from your vcpkg directory:
+
+```dos
+# Note: The package name is 'zeromq', not 'libzmq'
+.\vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 --triplet=x64-windows
+```
+
+#### Open the Project in Visual Studio
+
+1. Start Visual Studio 2022.
+2. Go to `File > Open > Folder...`
+3. Select your project's root folder (e.g., `D:\trial\Factory-HUB-main`).
+
+#### Configure and Build
+
+* Visual Studio reads the `CMakeLists.txt` file automatically.
+* Installed vcpkg packages are detected automatically.
+* The "Output" window will show: `"CMake configuration finished."`
+* Select the build type (e.g., Release) from the toolbar.
+* Select the "Startup Item" `FactoryHub.exe`.
+* Press the green "Run" arrow (or F5) to build, run, and debug.
+
+Alternatively, right-click `CMakeLists.txt` in Solution Explorer and select **Build**.
+
+---
+
+### 🐧 Path B: Linux with VS Code (Recommended)
+
+#### Install Build Tools
+
+```bash
+sudo apt update
+sudo apt install build-essential cmake git
+```
+
+#### Install Project Dependencies
+
+From your vcpkg directory:
+
+```bash
+# Note: The package name is 'zeromq', not 'libzmq'
+./vcpkg install glfw3 glew nlohmann-json zeromq paho-mqtt-c libmodbus open62541 --triplet=x64-linux
+```
+
+#### Open Project in VS Code
+
+Install **Visual Studio Code** and the following extensions:
+
+* **C/C++ Extension Pack**
+* **CMake Tools**
+
+Open your project folder:
 
 ```bash
 cd /path/to/Factory-HUB
-mkdir build
-cd build
+code .
 ```
 
-#### Windows (Visual Studio 2022)
+#### Configure VS Code
 
-```bash
-cmake .. -G "Visual Studio 17 2022" -DCMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake
+* When prompted by CMake Tools, configure and select a compiler kit (GCC or Clang).
+* If configuration fails due to vcpkg, press `Ctrl+Shift+P` → **Preferences: Open User Settings (JSON)** and add:
+
+```json
+"cmake.configureSettings": {
+    "CMAKE_TOOLCHAIN_FILE": "/home/your-user/dev/vcpkg/scripts/buildsystems/vcpkg.cmake"
+}
 ```
 
-#### Linux
+* Save the settings file.
 
-```bash
-cmake .. -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
-```
+#### Build and Run
+
+* Use the **Build** button in the VS Code status bar (or press F7).
+* Click **Run** (or `Ctrl+F5`) to execute `FactoryHub`.
 
 ---
 
-### **Step 3 — Build the project**
+## 📦 3. Dependency Analysis
 
-#### Windows (Release build)
+### 1. Local Dependency (Manual Build)
 
-```bash
-cmake --build . --config Release
-```
+**ImGui** (including `imgui_impl_glfw`, `imgui_impl_opengl3`)
 
-#### Linux
-
-```bash
-cmake --build .
-# or:
-make
-```
-
-Your executable will be located in:
-
-* **Windows:** `build/Release/FactoryHub.exe`
-* **Linux:** `build/FactoryHub`
-
----
-
-## 📦 Dependency Analysis
-
-The project uses a combination of **local/manual dependencies** and **vcpkg-managed dependencies**.
-
----
-
-### ### 1. Local Dependency (Manual Build)
-
-#### **ImGui**
-
-Includes:
-
-* `imgui_impl_glfw`
-* `imgui_impl_opengl3`
-
-**Purpose:** Core GUI rendering system.
-**Build:** Included manually via:
-
-```
-add_subdirectory(imgui)
-```
-
-CMake builds ImGui from `imgui/CMakeLists.txt`.
-
----
+* **Purpose:** Core GUI rendering system.
+* **Build:** Included manually via `add_subdirectory(imgui)`. CMake builds ImGui from its own `imgui/CMakeLists.txt`.
 
 ### 2. vcpkg-Managed Dependencies
 
-All other libraries are resolved automatically through:
+All other libraries are found via `find_package(...)` in `CMakeLists.txt`:
 
-```cmake
-find_package(...)
-```
+| Library           | Purpose                                                                 |
+| ----------------- | ----------------------------------------------------------------------- |
+| **glfw3**         | Window creation & input handling; creates the OpenGL context for ImGui. |
+| **glew**          | Loads modern OpenGL functions; required by ImGui’s OpenGL3 backend.     |
+| **nlohmann_json** | JSON serialization (Header-only).                                       |
+| **zeromq**        | High-performance pub/sub messaging; used for `inproc://data_ingress`.   |
+| **paho-mqtt-c**   | MQTT client library.                                                    |
+| **libmodbus**     | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`.               |
+| **open62541**     | OPC-UA communication stack; used in `OpcuaAdapter`.                     |
 
-#### **glfw3**
+---
 
-* Window creation & input handling
-* Creates OpenGL context for ImGui
+If you want, I can also **add a clean “Quick Start” section with 1–2 command blocks** that combines Windows and Linux setup for even faster onboarding.
 
-#### **glew**
-
-* Loads modern OpenGL functions
-* Required by ImGui’s OpenGL3 backend
-
-#### **nlohmann_json**
-
-* JSON serialization
-* Header-only
-
-#### **zeromq**
-
-* High-performance pub/sub messaging
-* Used for `inproc://data_ingress`
-
-#### **paho-mqtt-c**
-
-* MQTT client library
-
-#### **libmodbus**
-
-* Modbus TCP/RTU communication
-* Used in `ModbusTCPAdapter`
-
-#### **open62541**
-
-* OPC-UA communication stack
-* Used in `OpcuaAdapter`
+Do you want me to do that?

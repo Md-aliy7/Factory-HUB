@@ -5,8 +5,6 @@
 // --- global variables ---
 unsigned int s_hardware_cores = (std::thread::hardware_concurrency() > 0) ? std::thread::hardware_concurrency() : 4;
 int s_worker_pool_size = (int)s_hardware_cores; // Default to the number of logical cores
-int s_ws_port = 9001; // Default WebSocket port
-std::string s_ws_host = "0.0.0.0"; // Default host (all interfaces)
 
 // --- FORWARD DECLARATIONS (for circular dependency fix) ---
 class ModbusTCPAdapter;
@@ -306,7 +304,8 @@ void ModbusDeviceWorker::OnPollComplete(const std::string& poll_status, const nl
         j["adapterName"] = m_adapter->GetName();
         j["protocol"] = m_adapter->GetProtocol();
         j["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        j["values"] = j_values;
+        j["payload"] = j_values;
+
         static_cast<ModbusTCPAdapter*>(m_adapter)->PushData(j.dump());
     }
     m_poll_timer.expires_after(std::chrono::seconds(1));
@@ -505,7 +504,8 @@ void OpcuaDeviceWorker::OnPollComplete(const std::string& poll_status, const nlo
         j["adapterName"] = m_adapter->GetName();
         j["protocol"] = m_adapter->GetProtocol();
         j["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-        j["values"] = j_values;
+        j["payload"] = j_values;
+
         static_cast<OpcuaAdapter*>(m_adapter)->PushData(j.dump());
     }
     m_poll_timer.expires_after(std::chrono::seconds(1));
@@ -692,15 +692,36 @@ void MqttAdapter::HandleCommand(const std::string& device_name, const nlohmann::
     if (m_devices.count(device_name)) {
         auto& worker = m_devices[device_name];
         std::string topic = worker->commandTopic;
-        std::string payload = cmd.dump();
-        if (!topic.empty() && worker->client) {
-            if (g_log_show_egress) AddLog("MQTT: Publishing to " + topic + ": " + payload, LogType::EGRESS);
+
+        // [FIX 1] Check for empty topic and LOG ERROR (fixes "not shown on live log")
+        if (topic.empty()) {
+            if (g_log_show_egress) AddLog("MQTT Error: No 'commandTopic' configured for " + device_name, LogType::EGRESS);
+            return;
+        }
+
+        // [FIX 2] Extract ONLY the payload content (removes "deviceID" wrapper)
+        std::string payload_str;
+        if (cmd.contains("payload")) {
+            const auto& p = cmd["payload"];
+            if (p.is_string()) payload_str = p.get<std::string>(); // Handle raw string payloads
+            else payload_str = p.dump();                           // Handle JSON object payloads
+        }
+        else {
+            payload_str = cmd.dump(); // Fallback
+        }
+
+        if (worker->client) {
+            if (g_log_show_egress) AddLog("MQTT: Publishing to " + topic + ": " + payload_str, LogType::EGRESS);
+
             MQTTClient_message pubmsg = MQTTClient_message_initializer;
-            pubmsg.payload = (void*)payload.c_str();
-            pubmsg.payloadlen = (int)payload.length();
+            pubmsg.payload = (void*)payload_str.c_str();
+            pubmsg.payloadlen = (int)payload_str.length();
             pubmsg.qos = 1;
             pubmsg.retained = 0;
             MQTTClient_publishMessage(worker->client, topic.c_str(), &pubmsg, NULL);
+        }
+        else {
+            if (g_log_show_egress) AddLog("MQTT Error: Client not connected for " + device_name, LogType::EGRESS);
         }
     }
 }
@@ -734,7 +755,7 @@ int MqttAdapter::on_message_arrived(void* context, char* topicName, int topicLen
     try { parsed_payload = nlohmann::json::parse(payload); }
     catch (...) { parsed_payload = payload; }
 
-    j["values"][topic] = parsed_payload;
+    j["payload"] = parsed_payload;
 
     static_cast<MqttAdapter*>(worker->adapter)->PushData(j.dump());
 
@@ -1104,6 +1125,23 @@ void ZmqAdapter::ReaperLoop() {
     }
 }
 
+// =================================================================================
+// Static Callback for Cloud Messages (WebUI -> Hub)
+// =================================================================================
+int CloudMsgArrived(void* context, char* topicName, int topicLen, MQTTClient_message* message) {
+    GatewayHub* hub = (GatewayHub*)context;
+
+    if (message) {
+        std::string payload((char*)message->payload, message->payloadlen);
+        // Now valid because we made RouteCloudCommand public
+        hub->RouteCloudCommand(payload);
+
+        MQTTClient_freeMessage(&message);
+    }
+    MQTTClient_free(topicName);
+    return 1;
+}
+
 // --- GatewayHub (V3 REFECTOR) ---
 bool GatewayHub::_IsDeviceNameInUse_NoLock(const std::string& device_name) {
     for (auto& [adapter_name, adapter] : m_adapters) {
@@ -1123,7 +1161,15 @@ void GatewayHub::Start() {
     m_command_bridge_running = true;
     m_proxy_running = true;
     m_aggregator_running = true;
-    m_uws_subscriber_running = true;
+
+    // [FIX 1] Bind the Router Socket ONCE here
+    try {
+        m_cmd_router_socket.bind("inproc://command_stream");
+        AddLog("System: Command Router bound to inproc://command_stream");
+    }
+    catch (const zmq::error_t& e) {
+        AddLog("System Error: Failed to bind Command Router: " + std::string(e.what()));
+    }
 
     int pool_size = (s_worker_pool_size > 0) ? s_worker_pool_size : 4;
     for (int i = 0; i < pool_size; ++i) {
@@ -1134,13 +1180,19 @@ void GatewayHub::Start() {
     AddLog("Asio worker pool started with " + std::to_string(pool_size) + " threads.");
     PushNotification("Asio worker pool started", true);
 
-    m_cmd_router_socket.bind("inproc://command_stream");
+    // [FIX 2] Actually START the Command Bridge Thread
+    m_command_bridge_thread = std::thread(&GatewayHub::RunCommandBridge, this);
 
     m_data_proxy_thread = std::thread(&GatewayHub::RunDataProxy, this);
     m_aggregator_thread = std::thread(&GatewayHub::RunAggregator, this);
-    m_uws_subscriber_thread = std::thread(&GatewayHub::RunUwsSubscriber, this);
-    m_command_bridge_thread = std::thread(&GatewayHub::RunCommandBridge, this);
 
+    if (m_cloud_auto_connect) {
+        AddLog("System: Auto-connecting Cloud Link...", LogType::SYSTEM);
+        RestartCloudLink();
+    }
+    else {
+        AddLog("System: Cloud Link standby (Auto-Connect disabled).", LogType::SYSTEM);
+    }
     AddLog("Gateway Hub V3 core threads started.");
     PushNotification("Gateway Hub started.", true);
 }
@@ -1149,18 +1201,15 @@ void GatewayHub::Stop() {
     m_command_bridge_running = false;
     m_proxy_running = false;
     m_aggregator_running = false;
-    m_uws_subscriber_running = false;
+    m_cloud_stop_signal = true; // Signal cloud thread to stop
 
     if (m_command_bridge_thread.joinable()) m_command_bridge_thread.join();
     if (m_data_proxy_thread.joinable()) m_data_proxy_thread.join();
     if (m_aggregator_thread.joinable()) m_aggregator_thread.join();
-    if (m_uws_subscriber_thread.joinable()) m_uws_subscriber_thread.join();
+    if (m_cloud_thread.joinable()) m_cloud_thread.join();
 
     m_cmd_router_socket.close();
 
-    if (m_uws_thread.joinable()) {
-        m_uws_thread.detach(); // Note: Detaching is risky, but follows original logic
-    }
 
     {
         std::lock_guard<std::mutex> lock(m_adapters_mutex);
@@ -1176,45 +1225,6 @@ void GatewayHub::Stop() {
         if (t.joinable()) t.join();
     }
     AddLog("Gateway Hub stopped.");
-}
-
-void GatewayHub::StartUwsServer() {
-    try {
-        if (m_uws_running) {
-            PushNotification("uWS Server is already running.", false);
-            return;
-        }
-        if (m_uws_thread.joinable()) {
-            m_uws_thread.join();
-        }
-
-        m_uws_running = true;
-        m_uws_thread = std::thread(&GatewayHub::RunUwsServer, this);
-
-        std::unique_lock<std::mutex> lock(m_uws_mutex);
-        if (m_uws_cv.wait_for(lock, std::chrono::seconds(5),
-            [this] { return m_uws_loop != nullptr && m_uws_app_ptr != nullptr; })) {
-
-            AddLog("uWS Server initialized by user.");
-        }
-        else {
-            AddLog("uWS Server failed to initialize (timeout).", LogType::SYSTEM);
-            PushNotification("uWS Server failed to start (timeout).", false);
-            m_uws_running = false;
-
-            if (m_uws_thread.joinable()) {
-                m_uws_thread.join();
-            }
-        }
-    }
-    catch (...) {
-        AddLog("Unexpected exception starting uWS server.", LogType::SYSTEM);
-        m_uws_running = false;
-
-        if (m_uws_thread.joinable()) {
-            m_uws_thread.join();
-        }
-    }
 }
 
 void GatewayHub::RunCommandBridge() {
@@ -1287,6 +1297,7 @@ void GatewayHub::RunDataProxy() {
         while (m_proxy_running) {
             zmq::message_t msg;
             std::optional<size_t> res = pull.recv(msg, zmq::recv_flags::none);
+            // -------------------------
             if (res.has_value()) {
                 pub.send(msg, zmq::send_flags::none);
             }
@@ -1311,50 +1322,43 @@ void GatewayHub::RunAggregator() {
             zmq::message_t msg;
             std::optional<size_t> res = sub.recv(msg, zmq::recv_flags::none);
 
-            if (res.has_value()) { // We got a message
+            if (res.has_value()) {
                 std::string s = msg.to_string();
-                std::string adapterName, deviceId;
-
-                // --- Step 1: Parse both keys ---
                 try {
-                    nlohmann::json data = nlohmann::json::parse(s);
-                    adapterName = data.value("adapterName", "");
-                    deviceId = data.value("deviceId", "");
-                }
-                catch (const std::exception& e) {
-                    AddLog("Aggregator: Bad JSON: " + std::string(e.what()));
-                    continue; // Ignore bad JSON
-                }
+                    nlohmann::json j = nlohmann::json::parse(s);
+                    std::string deviceId = j.value("deviceId", "");
+                    std::string adapterName = j.value("adapterName", "");
 
-                if (adapterName.empty() || deviceId.empty()) continue;
+                    if (deviceId.empty() || adapterName.empty()) continue;
 
-                // --- Step 2: Perform the NEW TWO-LEVEL "Source of Truth" check ---
-                bool deviceIsStillActive = false;
-                {
-                    std::lock_guard<std::mutex> adapter_lock(m_adapters_mutex);
-                    auto it = m_adapters.find(adapterName);
-
-                    if (it != m_adapters.end()) {
-                        // Adapter is alive. Now ask the adapter: is the DEVICE alive?
-                        deviceIsStillActive = it->second->IsDeviceActive(deviceId);
+                    // Check if device is active (Simplified check for speed)
+                    bool isActive = false;
+                    {
+                        std::lock_guard<std::mutex> lock(m_adapters_mutex);
+                        if (m_adapters.count(adapterName)) {
+                            isActive = m_adapters[adapterName]->IsDeviceActive(deviceId);
+                        }
                     }
-                    // else: adapter is gone, so deviceIsStillActive remains false
-                }
 
-                // --- Step 3: Act on verified data ---
-                if (deviceIsStillActive) {
-                    // BOTH adapter and device are confirmed alive.
-                    // It's safe to create or update.
-                    std::lock_guard<std::mutex> lock(m_devices_mutex);
-                    _UpdateDeviceMap(s);
-                }
-                else {
-                    // This is a "zombie" message.
-                    std::lock_guard<std::mutex> lock(m_devices_mutex);
-                    if (m_devices.count(deviceId)) {
-                        m_devices.erase(deviceId);
+                    if (isActive) {
+                        std::lock_guard<std::mutex> lock(m_devices_mutex);
+                        DeviceData& dd = m_devices[deviceId];
+                        dd.id = deviceId;
+                        dd.adapter_name = adapterName;
+                        dd.protocol = j.value("protocol", "Unknown");
+                        dd.last_seen = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                        dd.message_count++;
+
+                        // [CHANGED] Extract only the payload for the "Last Value" column
+                        if (j.contains("payload")) {
+                            dd.last_value_json = j["payload"].dump();
+                        }
+                        else {
+                            dd.last_value_json = s; // Fallback to full message
+                        }
                     }
                 }
+                catch (...) { /* Ignore parse errors */ }
             }
         }
     }
@@ -1364,109 +1368,170 @@ void GatewayHub::RunAggregator() {
     AddLog("Aggregator thread stopped.");
 }
 
-void GatewayHub::RunUwsSubscriber() {
-    AddLog("uWS Subscriber thread started.");
-    try {
-        zmq::socket_t sub(m_zmq_context, zmq::socket_type::sub);
-        sub.connect("inproc://data_pubsub");
-        sub.set(zmq::sockopt::subscribe, "");
-        sub.set(zmq::sockopt::rcvtimeo, 100);
-        sub.set(zmq::sockopt::conflate, 1);
-        while (m_uws_subscriber_running) {
-            zmq::message_t msg;
-            std::optional<size_t> res = sub.recv(msg, zmq::recv_flags::none);
-            if (res.has_value()) {
-                std::string data_str = msg.to_string();
-
-                if (g_log_show_ingress) {
-                    AddLog("Ingress: " + data_str, LogType::INGRESS);
-                }
-
-                if (m_uws_running && m_uws_loop) {
-                    {
-                        std::lock_guard<std::mutex> lock(m_publish_queue_mutex);
-                        m_data_to_publish.push(data_str);
-                    }
-                    m_uws_loop->defer([this] { DeferPublishData(); });
-                }
-            }
-        }
+void GatewayHub::RestartCloudLink() {
+    // 1. Stop existing thread
+    m_cloud_stop_signal = true;
+    if (m_cloud_thread.joinable()) {
+        AddLog("System: Stopping Cloud Service...", LogType::SYSTEM);
+        m_cloud_thread.join(); // This blocks until the old connection attempt times out
     }
-    catch (const zmq::error_t& e) {
-        if (m_uws_subscriber_running) AddLog("uWS Subscriber thread exception: " + std::string(e.what()));
-    }
-    AddLog("uWS Subscriber thread stopped.");
+
+    // 2. Log the URL being used (Verify your UI input reached here)
+    AddLog("System: Starting Cloud Service -> " + m_mqtt_broker_url, LogType::SYSTEM);
+
+    // 3. Start new thread
+    m_cloud_stop_signal = false;
+    m_cloud_thread = std::thread(&GatewayHub::RunCloudLink, this);
 }
 
-void GatewayHub::RunUwsServer() {
-    AddLog("uWS thread started.");
+// =================================================================================
+// RunCloudLink - The Bidirectional Bridge
+// =================================================================================
+void GatewayHub::RunCloudLink() {
+    // 1. ZMQ Setup
+    zmq::socket_t data_sub(m_zmq_context, zmq::socket_type::sub);
     try {
-        m_uws_loop = uWS::Loop::get();
-        uWS::App local_app;
-        m_uws_app_ptr = &local_app;
-        uWS::App::WebSocketBehavior<std::string> behavior;
-        behavior.open = [this](auto* ws) {
-            AddLog("Web UI Client connected.");
-            ws->subscribe("data/all");
-            };
-        behavior.message = [this](auto* ws, std::string_view message, uWS::OpCode opCode) {
-            if (g_log_show_egress) AddLog("Web UI command received: " + std::string(message), LogType::EGRESS);
-            try {
-                nlohmann::json cmd = nlohmann::json::parse(message);
-                std::lock_guard<std::mutex> lock(m_command_queue_mutex);
-                m_command_queue.push(cmd);
-            }
-            catch (const std::exception& e) {
-                AddLog("Web UI command error: " + std::string(e.what()), LogType::EGRESS);
-            }
-            };
-        behavior.close = [this](auto* ws, int code, std::string_view message) {
-            AddLog("Web UI Client disconnected.");
-            };
-        local_app.ws<std::string>("/*", std::move(behavior))
-            .listen(s_ws_host, s_ws_port, [this](auto* token) {
-            if (token) {
-                AddLog("uWS Server listening on port " + std::to_string(s_ws_port));
-                PushNotification("uWS Server started on port " + std::to_string(s_ws_port), true);
-                m_uws_running = true;
-            }
-            else {
-                AddLog("uWS Server FAILED to listen on port " + std::to_string(s_ws_port));
-                PushNotification(
-                    "Error: Could not start server at " + s_ws_host + ":" + std::to_string(s_ws_port) +
-                    ". The host or port may be invalid or already in use.",
-                    false
-                );
-                m_uws_running = false;
-            }
-                });
-        {
-            std::lock_guard<std::mutex> lock(m_uws_mutex);
-            m_uws_cv.notify_one();
-        }
-        if (m_uws_running) {
-            local_app.run(); // Blocking call
-        }
+        data_sub.connect("inproc://data_pubsub");
+        data_sub.set(zmq::sockopt::subscribe, "");
     }
     catch (const std::exception& e) {
-        AddLog("uWS Thread exception: " + std::string(e.what()));
+        AddLog("CloudLink ZMQ Init Error: " + std::string(e.what()), LogType::SYSTEM);
+        return;
     }
-    m_uws_loop = nullptr;
-    m_uws_app_ptr = nullptr;
-    m_uws_running = false;
-    AddLog("uWS Server thread stopped.");
+
+    // 2. MQTT Setup
+    MQTTClient client;
+    MQTTClient_create(&client, m_mqtt_broker_url.c_str(), m_mqtt_client_id.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
+
+    MQTTClient_connectOptions conn_opts = MQTTClient_connectOptions_initializer;
+    conn_opts.keepAliveInterval = 20;
+    conn_opts.cleansession = 1;
+    conn_opts.username = m_mqtt_username.c_str();
+    conn_opts.password = m_mqtt_password.c_str();
+    conn_opts.connectTimeout = 3;
+
+    MQTTClient_SSLOptions ssl_opts = MQTTClient_SSLOptions_initializer;
+    if (m_mqtt_broker_url.find("ssl://") != std::string::npos) {
+        ssl_opts.enableServerCertAuth = 0;
+        conn_opts.ssl = &ssl_opts;
+    }
+
+    // [FIX 1] Set Callbacks BEFORE connecting
+    // This enables the Paho background thread to handle incoming commands automatically
+    MQTTClient_setCallbacks(client, this, NULL, CloudMsgArrived, NULL);
+
+    AddLog("CloudLink: Connecting to " + m_mqtt_broker_url + "...", LogType::SYSTEM);
+
+    int rc = MQTTClient_connect(client, &conn_opts);
+    if (rc != MQTTCLIENT_SUCCESS) {
+        AddLog("CloudLink Error: Connect failed code " + std::to_string(rc), LogType::SYSTEM);
+        m_cloud_connected = false;
+        return;
+    }
+
+    m_cloud_connected = true;
+    AddLog("CloudLink: Connected!", LogType::SYSTEM);
+
+    std::string rpc_topic = "v1/hubs/" + m_mqtt_client_id + "/rpc";
+    std::string telemetry_topic = "v1/hubs/" + m_mqtt_client_id + "/telemetry";
+
+    if ((rc = MQTTClient_subscribe(client, rpc_topic.c_str(), 1)) != MQTTCLIENT_SUCCESS) {
+        AddLog("CloudLink Error: Subscribe failed code " + std::to_string(rc), LogType::SYSTEM);
+    }
+    else {
+        AddLog("CloudLink: Listening for commands on " + rpc_topic, LogType::SYSTEM);
+    }
+
+    // 4. Main Loop - Now simplifies to just handling Ingress
+    while (m_command_bridge_running && !m_cloud_stop_signal) {
+
+        // --- A. INGRESS (Device -> WebUI) ---
+        zmq::message_t z_msg;
+        // Non-blocking check. If we have data, send it.
+        if (data_sub.recv(z_msg, zmq::recv_flags::dontwait)) {
+            std::string payload(static_cast<char*>(z_msg.data()), z_msg.size());
+            if (g_log_show_ingress) AddLog("Cloud TX: " + payload, LogType::INGRESS);
+            MQTTClient_message pubmsg = MQTTClient_message_initializer;
+            pubmsg.payload = (void*)payload.data();
+            pubmsg.payloadlen = (int)payload.size();
+            pubmsg.qos = 0;
+            pubmsg.retained = 0;
+
+            MQTTClient_publishMessage(client, telemetry_topic.c_str(), &pubmsg, NULL);
+        }
+        else {
+            // [FIX 2] Sleep briefly to prevent high CPU usage when idle
+            // The incoming commands are now handled by Paho's background thread
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    MQTTClient_disconnect(client, 1000);
+    MQTTClient_destroy(&client);
+    m_cloud_connected = false;
 }
 
-void GatewayHub::DeferPublishData() {
-    if (!m_uws_app_ptr) return;
-    std::queue<std::string> local_queue;
-    {
-        std::lock_guard<std::mutex> lock(m_publish_queue_mutex);
-        std::swap(local_queue, m_data_to_publish);
+// =================================================================================
+// RouteCloudCommand: ZMQ Router Logic
+// =================================================================================
+void GatewayHub::RouteCloudCommand(const std::string& payload) {
+    // 1. Parse
+    nlohmann::json json_cmd;
+    try {
+        json_cmd = nlohmann::json::parse(payload, nullptr, false);
     }
-    while (!local_queue.empty()) {
-        m_uws_app_ptr->publish("data/all", local_queue.front(), uWS::OpCode::TEXT);
-        local_queue.pop();
+    catch (...) { return; }
+
+    if (json_cmd.is_discarded()) {
+        AddLog("Cmd Error: Invalid JSON", LogType::EGRESS);
+        return;
+    }
+
+    // 2. Extract Device ID
+    std::string device_id = json_cmd.value("deviceID", "");
+    if (device_id.empty()) {
+        AddLog("Cmd Error: Missing deviceID", LogType::EGRESS);
+        return;
+    }
+
+    // 3. Find Adapter (Thread-safe map access)
+    std::string adapter_name;
+    bool adapter_found = false;
+    {
+        std::lock_guard<std::mutex> lock(m_adapters_mutex);
+        for (auto const& [name, adapter] : m_adapters) {
+            if (adapter->IsDeviceActive(device_id)) {
+                adapter_name = name;
+                adapter_found = true;
+                break;
+            }
+        }
+    }
+
+    if (adapter_found) {
+        // 4. Construct Internal Command (same format as SendTestCommand)
+        nlohmann::json cmd;
+        cmd["targetAdapter"] = adapter_name;
+        cmd["targetDevice"] = device_id;
+
+        // Handle payload wrapping
+        if (json_cmd.contains("payload")) {
+            cmd["payload"] = json_cmd["payload"];
+        }
+        else {
+            cmd["payload"] = json_cmd;
+        }
+
+        // [FIX 5] Push to Queue
+        {
+            std::lock_guard<std::mutex> lock(m_command_queue_mutex);
+            m_command_queue.push(cmd);
+        }
+
+        if (g_log_show_egress) AddLog("Cloud: Queued cmd for " + device_id, LogType::EGRESS);
+    }
+    else {
+        AddLog("Cmd Error: Device '" + device_id + "' not found", LogType::EGRESS);
     }
 }
 
@@ -1620,16 +1685,45 @@ std::map<std::string, std::string> GatewayHub::GetDeviceStatusesForAdapter(const
     return {};
 }
 
-void GatewayHub::SendTestCommand(const std::string& adapter_name, const std::string& payload_json) {
+// =================================================================================
+// SendTestCommand: Bypasses ZMQ, Uses Direct Object Access
+// =================================================================================
+void GatewayHub::SendTestCommand(const std::string& device_id, const std::string& payload_json) {
+    // 1. Find Adapter for this Device
+    std::string adapter_name;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(m_adapters_mutex);
+        for (auto const& [name, adapter] : m_adapters) {
+            if (adapter->IsDeviceActive(device_id)) {
+                adapter_name = name;
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        PushNotification("Error: Device '" + device_id + "' not found", false);
+        return;
+    }
+
+    // 2. Construct Command
     try {
-        nlohmann::json cmd = nlohmann::json::parse(payload_json);
+        nlohmann::json cmd;
         cmd["targetAdapter"] = adapter_name;
+        cmd["targetDevice"] = device_id;
+
+        // Parse user payload
+        nlohmann::json user_payload = nlohmann::json::parse(payload_json);
+        cmd["payload"] = user_payload;
+
         std::lock_guard<std::mutex> lock(m_command_queue_mutex);
         m_command_queue.push(cmd);
-        PushNotification("Test command sent to " + adapter_name, true);
+        PushNotification("Test command queued for " + device_id, true);
     }
     catch (const std::exception& e) {
-        PushNotification(std::string("Command JSON error: ") + e.what(), false);
+        PushNotification("Invalid JSON: " + std::string(e.what()), false);
     }
 }
 

@@ -41,10 +41,6 @@
 #include <open62541/client_highlevel.h>
 #include <open62541/client_subscriptions.h>
 
-// --- uWebSockets ---
-#include <uwebsockets/App.h>
-#include <uwebsockets/WebSocket.h>
-
 // --- Boost.Asio ---
 // (We only need the main header for post, strands, and timers)
 #include <boost/asio.hpp>
@@ -467,19 +463,10 @@ private:
     std::thread m_aggregator_thread;
     std::atomic<bool> m_aggregator_running;
 
-    // V3 uWS Subscriber Thread
-    std::thread m_uws_subscriber_thread;
-    std::atomic<bool> m_uws_subscriber_running;
-
-    // uWebSockets
-    std::thread m_uws_thread;
-    std::queue<std::string> m_data_to_publish;
-    std::mutex m_publish_queue_mutex;
-    uWS::App* m_uws_app_ptr = nullptr;
-    std::atomic<bool> m_uws_running;
-    uWS::Loop* m_uws_loop = nullptr;
-    std::mutex m_uws_mutex;
-    std::condition_variable m_uws_cv;
+    // Cloud Link Private Members
+    std::thread m_cloud_thread;
+    std::atomic<bool> m_cloud_stop_signal{ false };
+    std::atomic<bool> m_cloud_connected{ false };
 
     // Asio Thread Pool
     boost::asio::io_context m_io_context;
@@ -491,9 +478,7 @@ private:
     void RunCommandBridge();
     void RunDataProxy();
     void RunAggregator();
-    void RunUwsSubscriber();
-    void RunUwsServer();
-    void DeferPublishData();
+    void RunCloudLink();
     void _UpdateDeviceMap(const std::string& json_data);
 
 public:
@@ -505,8 +490,6 @@ public:
         m_cmd_router_socket(m_zmq_context, zmq::socket_type::router),
         m_proxy_running(false),
         m_aggregator_running(false),
-        m_uws_subscriber_running(false),
-        m_uws_running(false),
         m_work_guard(boost::asio::make_work_guard(m_io_context))
     {
         AddLog("GatewayHub constructed.");
@@ -514,16 +497,20 @@ public:
 
     ~GatewayHub(); // Implementation is in the .cpp file
 
+    // Configuration (Public for UI access, or make getters/setters)
+    // std::string m_mqtt_broker_url = "ssl://broker.emqx.io:8883"; // Default secure broker
+    void RouteCloudCommand(const std::string& payload);
+    std::string m_mqtt_broker_url = "tcp://localhost:1883";
+    std::string m_mqtt_client_id = "gateway_hub_v3";
+    std::string m_mqtt_username = "";
+    std::string m_mqtt_password = "";
+
+    // Auto-connect flag (Default: false prevents boot loops)
+    bool m_cloud_auto_connect = false;
+
     // --- Public Method Declarations ---
     void Start();
     void Stop();
-
-    void StartUwsServer();
-
-    // Simple getters are left inline
-    bool GetUwsStatus() const {
-        return m_uws_running;
-    }
 
     bool HasAdapters() const {
         std::lock_guard<std::mutex> lock(m_adapters_mutex);
@@ -552,6 +539,8 @@ public:
     bool RestartDevice(const std::string& adapter_name, const std::string& device_name);
     std::map<std::string, std::string> GetDeviceStatusesForAdapter(const std::string& adapter_name);
 
-    void SendTestCommand(const std::string& adapter_name, const std::string& payload_json);
+    void SendTestCommand(const std::string& device_id, const std::string& payload_json);
+    void RestartCloudLink(); // Call this when UI settings change
+    bool GetCloudStatus() const { return m_cloud_connected; }
 };
 

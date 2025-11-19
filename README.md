@@ -276,10 +276,6 @@ sudo pacman -S base-devel cmake mesa openssl libmodbus glew
 
 ---
 
-Here is the updated **Dependency Analysis and Build Guide**, revised to reflect the removal of uWebSockets and the focus on Paho MQTT for the cloud link.
-
------
-
 # 📦 4. Dependency Analysis
 
 This project relies on a mix of local source files and automated package management via **CPM (C++ Package Manager)**.

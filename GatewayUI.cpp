@@ -13,98 +13,9 @@ void DrawGatewayUI(GatewayHub& hub) {
     ImGui::SetNextWindowSize(ImVec2(1000, 700), ImGuiCond_FirstUseEver);
     ImGui::Begin("Multiprotocol Gateway Hub");
 
-    ImGui::Text("uWS Server:");
-    ImGui::SameLine();
-
-    bool adapters_exist = hub.HasAdapters();
-    bool uws_running = hub.GetUwsStatus();
-
-    // --- Local buffers for host and port ---
-    static int port_buf = s_ws_port;
-    static char s_ws_host_buf[256];
-    static bool s_host_buf_initialized = false;
-    if (!s_host_buf_initialized) {
-        // One-time copy from the global std::string to the local char buffer
-        strncpy(s_ws_host_buf, s_ws_host.c_str(), 256);
-        s_ws_host_buf[255] = '\0'; // Ensure null-termination
-        s_host_buf_initialized = true;
-    }
-
-    // --- Disable inputs if server is running or adapters exist ---
-    if (uws_running) ImGui::BeginDisabled(true);
-
-    // --- Port Input ---
-    ImGui::PushItemWidth(100);
-    if (ImGui::InputInt("Port", &port_buf)) {
-        if (port_buf < 1024) port_buf = 1024;
-        if (port_buf > 65535) port_buf = 65535;
-    }
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-
-    // --- Host Input ---
-    ImGui::PushItemWidth(150); // A bit wider for IP/domain
-    ImGui::InputText("Host", s_ws_host_buf, 256);
-    ImGui::PopItemWidth();
-
-    // --- End Disable ---
-    if (uws_running) ImGui::EndDisabled();
-
-    ImGui::SameLine();
-
-    if (uws_running) {
-        // --- Running State ---
-        // Display "localhost" if listening on "0.0.0.0" for better clarity
-        const char* display_host = (s_ws_host == "0.0.0.0") ? "localhost" : s_ws_host.c_str();
-        ImGui::TextColored(ImVec4(0, 1, 0, 1), "Running at ws://%s:%d", display_host, s_ws_port);
-        ImGui::SameLine();
-        float button_width = ImGui::CalcTextSize("Shut Down Server").x + ImGui::GetStyle().FramePadding.x * 2;
-        float right_edge = ImGui::GetWindowContentRegionMax().x;
-        ImGui::SetCursorPosX(right_edge - button_width);
-        static bool show_exit_popup = false;
-        if (ImGui::Button("Shut Down Server")) {
-            show_exit_popup = true;
-        }
-        if (show_exit_popup) {
-            ImGui::OpenPopup("Exit Confirmation");
-        }
-        if (ImGui::BeginPopupModal("Exit Confirmation", NULL, ImGuiWindowFlags_AlwaysAutoResize))
-        {
-            ImGui::Text("Are you sure you want to exit?");
-            ImGui::Separator();
-
-            if (ImGui::Button("Yes", ImVec2(120, 0))) {
-                std::exit(0);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("No", ImVec2(120, 0))) {
-                show_exit_popup = false;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-    }
-    else {
-        static bool server_running = false;
-
-        ImGui::BeginDisabled(server_running);
-        if (ImGui::Button("Start Server")) {
-            s_ws_port = port_buf;
-            s_ws_host = s_ws_host_buf;
-
-            server_running = true;
-
-            // Capture hub by reference is okay if it's global or static
-            std::thread([&hub]() {
-                hub.StartUwsServer();
-                server_running = false;
-                }).detach();
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Stopped.");
-    }
-    ImGui::Separator();
+    ImGui::Text("System Status: "); ImGui::SameLine();
+    if (hub.GetCloudStatus()) ImGui::TextColored(ImVec4(0, 1, 0, 1), "CLOUD CONNECTED");
+    else ImGui::TextColored(ImVec4(1, 0, 0, 1), "CLOUD DISCONNECTED");
 
     if (ImGui::BeginTabBar("MainTabs")) {
         // --- Tab 1: Live Log ---
@@ -440,25 +351,87 @@ void DrawGatewayUI(GatewayHub& hub) {
 
         // --- Tab 4: Send Test Command ---
         if (ImGui::BeginTabItem("Send Test Command")) {
-            static char adapter_name_buf[128] = "MqttService1";
-            static char command_json_buf[512] = "{\"targetDevice\":\"MyBroker\", \"command\":\"publish\", \"payload\": \"Hello from Hub\"}";
-            ImGui::Text("Note: Commands are sent to the Adapter Service.");
-            ImGui::Text("The service is responsible for routing to the correct device.");
-            ImGui::InputText("Adapter Service Name##CmdTarget", adapter_name_buf, IM_ARRAYSIZE(adapter_name_buf));
-            ImGui::TextUnformatted("Command JSON");
-            ImGui::InputTextMultiline(
-                "##CmdPayload",
-                command_json_buf,
-                IM_ARRAYSIZE(command_json_buf),
-                ImVec2(ImGui::GetContentRegionAvail().x, 150)
-            );
+            // [CHANGED] Label matches logic
+            static char device_id_buf[128] = "";
+            ImGui::InputText("Target Device ID", device_id_buf, IM_ARRAYSIZE(device_id_buf));
+
+            static char payload_buf[1024] = "{\"command\": \"write\", \"val\": 123}";
+            ImGui::InputTextMultiline("JSON Payload", payload_buf, IM_ARRAYSIZE(payload_buf));
+
             if (ImGui::Button("Send Command")) {
-                hub.SendTestCommand(adapter_name_buf, command_json_buf);
+                hub.SendTestCommand(std::string(device_id_buf), std::string(payload_buf));
             }
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Note: The adapter's command handler (if implemented)\nmust parse the JSON to find the 'targetDevice'.");
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Note: Enter the unique Device ID (e.g. 'MQTT_Sensor_1')");
             ImGui::EndTabItem();
         }
 
+        // --- Tab 5: Cloud Link ---
+        if (ImGui::BeginTabItem("Cloud Link")) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "MQTT Uplink Configuration");
+            ImGui::Separator();
+
+            // Static buffers for the Text Input fields
+            static char broker_buf[256];
+            static char id_buf[128];
+            static char user_buf[128];
+            static char pass_buf[128];
+            static bool init_ui = false;
+
+            // Initialize buffers ONCE with current Hub values
+            if (!init_ui) {
+                strcpy(broker_buf, hub.m_mqtt_broker_url.c_str());
+                strcpy(id_buf, hub.m_mqtt_client_id.c_str());
+                strcpy(user_buf, hub.m_mqtt_username.c_str());
+                strcpy(pass_buf, hub.m_mqtt_password.c_str());
+                init_ui = true;
+            }
+
+            // 1. Configuration Inputs
+            ImGui::InputText("Broker URL", broker_buf, 256);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("e.g. tcp://localhost:1883 or ssl://broker.emqx.io:8883");
+
+            ImGui::InputText("Client ID", id_buf, 128);
+            ImGui::InputText("Username", user_buf, 128);
+            ImGui::InputText("Password", pass_buf, 128, ImGuiInputTextFlags_Password);
+
+            // 2. Auto-Connect Toggle
+            // Direct binding to the boolean is safe and effective
+            ImGui::Checkbox("Auto-Connect on Startup", &hub.m_cloud_auto_connect);
+
+            ImGui::Spacing();
+            ImGui::Separator();
+
+            // 3. Status & Controls
+            if (hub.GetCloudStatus()) {
+                ImGui::TextColored(ImVec4(0, 1, 0, 1), "Status: ONLINE");
+                ImGui::SameLine();
+                if (ImGui::Button("Disconnect")) {
+                    // To disconnect, we just stop the thread (Restart does stop+start)
+                    // You might want a specific StopCloudLink() or just toggle a bool.
+                    // For now, let's just use Restart logic or ignore.
+                }
+            }
+            else {
+                ImGui::TextColored(ImVec4(1, 0, 0, 1), "Status: OFFLINE");
+            }
+
+            // 4. The Restart Button
+            if (ImGui::Button("Apply & Connect", ImVec2(200, 30))) {
+                // explicit update of hub variables from buffers
+                hub.m_mqtt_broker_url = std::string(broker_buf);
+                hub.m_mqtt_client_id = std::string(id_buf);
+                hub.m_mqtt_username = std::string(user_buf);
+                hub.m_mqtt_password = std::string(pass_buf);
+
+                // Force Restart
+                hub.RestartCloudLink();
+            }
+            ImGui::Separator();
+            ImGui::Text("Topics:");
+            ImGui::BulletText("Publish: v1/hubs/%s/telemetry", id_buf);
+            ImGui::BulletText("Subscribe: v1/hubs/%s/rpc", id_buf);
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
 

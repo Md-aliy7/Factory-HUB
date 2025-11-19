@@ -276,72 +276,74 @@ sudo pacman -S base-devel cmake mesa openssl libmodbus glew
 
 ---
 
-## 📦 4. Dependency Analysis
+Here is the updated **Dependency Analysis and Build Guide**, revised to reflect the removal of uWebSockets and the focus on Paho MQTT for the cloud link.
 
-### 1. Local Dependencies (Manual Build)
+-----
 
-**ImGui** (including `imgui_impl_glfw`, `imgui_impl_opengl3`)
+# 📦 4. Dependency Analysis
 
-- **Purpose:** Core GUI rendering system.
-- **Build:** Included manually in the project source folder.
+This project relies on a mix of local source files and automated package management via **CPM (C++ Package Manager)**.
 
-### 2. CPM-Managed Dependencies (Automatically Downloaded & Built)
+### **1. Local Dependencies (Manual Build)**
 
-| Library           | Purpose                                                                 | Notes                              |
-| ----------------- | ----------------------------------------------------------------------- | ---------------------------------- |
-| **glfw3**         | Window creation & input handling; creates the OpenGL context for ImGui. | Built from source via CPM          |
-| **glew**          | Loads modern OpenGL functions; required by ImGui's OpenGL3 backend.     | Uses system library if available   |
-| **nlohmann_json** | JSON serialization (Header-only).                                       | Header-only, no compilation needed |
-| **zeromq**        | High-performance pub/sub messaging; used for `inproc://data_ingress`.   | Built from source via CPM          |
-| **paho-mqtt-c**   | MQTT client library.                                                    | Built from source via CPM          |
-| **libmodbus**     | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`.               | Uses system library if available   |
-| **open62541**     | OPC-UA communication stack; used in `OpcuaAdapter`.                     | Built from source via CPM          |
-| **boost-asio**    | Asynchronous networking & I/O operations.                               | Built from source via CPM          |
-| **uWebSockets**   | High-performance WebSocket server/client library.                       | Built from source via CPM          |
-| **zlib**          | Compression library (required by uWebSockets).                          | Built from source via CPM          |
-| **uSockets**      | Low-level socket library (required by uWebSockets).                     | Built from uWebSockets submodule   |
+| Library | Purpose | Notes |
+| :--- | :--- | :--- |
+| **ImGui** (incl. `imgui_impl_glfw`, `imgui_impl_opengl3`) | Core GUI rendering system. | Included manually in the project source folder. |
 
-1. **Clone the repository:**
+### **2. CPM-Managed Dependencies (Automatically Downloaded & Built)**
 
-   ```bash
-   git clone https://github.com/your-username/Factory-HUB.git
-   cd Factory-HUB
-   ```
+| Library | Purpose | Notes |
+| :--- | :--- | :--- |
+| **glfw3** | Window creation & input handling; creates the OpenGL context for ImGui. | Built from source via CPM. |
+| **glew** | Loads modern OpenGL functions; required by ImGui's OpenGL3 backend. | Uses system library if available. |
+| **nlohmann\_json** | JSON serialization (Header-only). | Header-only, no compilation needed. |
+| **zeromq** | High-performance pub/sub messaging; used for the internal bus (`inproc://data_ingress`). | Built from source via CPM. |
+| **paho-mqtt-c** | **Cloud Link & MQTT Adapter.** Handles the uplink to the Central Broker and generic MQTT devices. | Built from source via CPM. |
+| **libmodbus** | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`. | Uses system library if available. |
+| **open62541** | OPC-UA communication stack; used in `OpcuaAdapter`. | Built from source via CPM. |
+| **boost-asio** | Asynchronous networking & I/O operations (Timers, Thread Pool). | Built from source via CPM. |
 
-2. **Create build directory and configure:**
+> **Note:** *uWebSockets, uSockets, and zlib have been removed in V3 as the architecture shifted from a WebSocket Server to an MQTT Client model.*
 
-   ```bash
-   mkdir build
-   cd build
-   cmake ..
-   ```
+-----
 
-3. **Build the project:**
+### **Build Instructions**
 
-   ```bash
-   cmake --build . --config Release
-   ```
+**1. Clone the repository:**
 
-   Or on Linux/macOS:
+```bash
+git clone https://github.com/your-username/Factory-HUB.git
+cd Factory-HUB
+```
 
-   ```bash
-   make -j$(nproc)
-   ```
+**2. Create build directory and configure:**
 
-4. **Run the application:**
+```bash
+mkdir build
+cd build
+cmake ..
+```
 
-   ```bash
-   # Linux/macOS
-   ./bin/Factory-HUB
+**3. Build the project:**
 
-   # Windows (Command Prompt)
-   .\bin\Release\Factory-HUB.exe
+```bash
+cmake --build . --config Release
+```
 
-   # Windows (PowerShell)
-   .\bin\Release\Factory-HUB.exe
-   ```
+**4. Run the application:**
 
-### Quick Build (One-liner)
+  * **Linux/macOS:**
+    ```bash
+    ./bin/Factory-HUB
+    ```
+  * **Windows (Command Prompt/PowerShell):**
+    ```powershell
+    .\bin\Release\Factory-HUB.exe
+    ```
+
+-----
+
+### **Quick Build (One-liner)**
 
 **Linux/macOS:**
 
@@ -355,45 +357,32 @@ mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc) && ./bin/Fa
 mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" -A x64; cmake --build . --config Release; .\bin\Release\Factory-HUB.exe
 ```
 
-**Windows (Command Prompt):**
+-----
 
-```cmd
-mkdir build && cd build && cmake .. -G "Visual Studio 17 2022" -A x64 && cmake --build . --config Release && .\bin\Release\Factory-HUB.exe
-```
+### **Troubleshooting**
 
-### Troubleshooting
+  * **If CMake fails to find OpenSSL:**
 
-**If CMake fails to find OpenSSL:**
+      * **Linux:** Install `libssl-dev` (Ubuntu/Debian) or `openssl` (Arch).
+      * **macOS:** `brew install openssl` then set `-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl`.
+      * **Windows:**
+          * Install via vcpkg: `.\vcpkg install openssl:x64-windows` and use `-DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake`
+          * Or download from [Win32/Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html) and set `-DOPENSSL_ROOT_DIR=C:\OpenSSL-Win64`.
 
-- **Linux:** Install `libssl-dev` (Ubuntu/Debian) or `openssl` (Arch)
-- **macOS:** `brew install openssl` then set `-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl`
-- **Windows:**
-  - Install via vcpkg: `.\vcpkg install openssl:x64-windows` and use `-DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake`
-  - Or download from [Win32/Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html) and set `-DOPENSSL_ROOT_DIR=C:\OpenSSL-Win64`
+  * **Windows-specific issues:**
 
-**Windows-specific issues:**
+      * **"CMake Error: Could not find CMAKE\_ROOT":** Make sure CMake is installed and added to PATH.
+      * **"LNK1104: cannot open file 'libmodbus.lib'":** Install libmodbus via vcpkg or ensure system libraries are available.
+      * **"Cannot open include file: 'GL/glew.h'":** Install GLEW via vcpkg or ensure OpenGL development libraries are installed.
 
-- **"CMake Error: Could not find CMAKE_ROOT"**: Make sure CMake is installed and added to PATH, or use full path to cmake.exe
-- **"LNK1104: cannot open file 'libmodbus.lib'"**: Install libmodbus via vcpkg or ensure system libraries are available
-- **"Cannot open include file: 'GL/glew.h'"**: Install GLEW via vcpkg or ensure OpenGL development libraries are installed
-- **Build errors with uSockets**: The uSockets library is built automatically from the uWebSockets submodule. If it fails, ensure you have a C compiler (cl.exe) available in your PATH
+  * **If dependencies fail to download:**
 
-**If build fails with linking errors:**
+      * Check your internet connection.
+      * Some dependencies are large (Boost, Open62541). The first build may take 10–20 minutes.
+      * You can use a local cache by setting the `CPM_SOURCE_CACHE` environment variable:
+          * **Windows:** `set CPM_SOURCE_CACHE=C:\path\to\cache`
+          * **Linux/macOS:** `export CPM_SOURCE_CACHE=/path/to/cache`
 
-- Ensure all system dependencies are installed
-- Try cleaning the build directory: `rm -rf build && mkdir build`
-- Check that your compiler supports C++20
+  * **Windows firewall/antivirus:**
 
-**If dependencies fail to download:**
-
-- Check your internet connection
-- Some dependencies are large (Boost, uWebSockets) - first build may take 10-20 minutes
-- You can use a local cache by setting `CPM_SOURCE_CACHE` environment variable:
-  - **Windows:** `set CPM_SOURCE_CACHE=C:\path\to\cache` (Command Prompt) or `$env:CPM_SOURCE_CACHE="C:\path\to\cache"` (PowerShell)
-  - **Linux/macOS:** `export CPM_SOURCE_CACHE=/path/to/cache`
-
-**Windows firewall/antivirus:**
-
-- Some antivirus software may interfere with downloading dependencies
-- If downloads fail, temporarily disable antivirus or add CMake build directory to exclusions
-- Windows Defender may need to allow CMake and Git through the firewall
+      * Some antivirus software may interfere with downloading dependencies via CMake. If downloads fail, temporarily disable antivirus or add the `build` directory to exclusions.

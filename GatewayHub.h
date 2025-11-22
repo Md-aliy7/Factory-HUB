@@ -31,6 +31,26 @@
 #include <deque>
 #include <nlohmann/json.hpp>
 
+// protobuf 5.29.5 is required
+// [ADDED] Sparkplug B Protobuf Definitions
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4251 4275)
+#endif
+
+#include "sparkplug_b.pb.h"
+#include <google/protobuf/message.h>
+#include <google/protobuf/descriptor.h>
+// ... your other protobuf includes
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+// [ADDED] Namespace Alias for cleaner code in later phases
+// Instead of typing org::eclipse::tahu::protobuf::Payload every time, we just use SparkplugB::Payload
+namespace SparkplugB = org::eclipse::tahu::protobuf;
+
 // --- C/C++ Libraries for Adapters ---
 #include <zmq.hpp> // ZeroMQ C++ Wrapper
 #include "MQTTClient.h" // Paho MQTT C Client
@@ -467,11 +487,19 @@ private:
     std::thread m_cloud_thread;
     std::atomic<bool> m_cloud_stop_signal{ false };
     std::atomic<bool> m_cloud_connected{ false };
+    MQTTClient m_mqtt_client;
 
     // Asio Thread Pool
     boost::asio::io_context m_io_context;
     std::vector<std::thread> m_thread_pool;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> m_work_guard;
+
+    // Sparkplug B Lifecycle Sequence
+    // Must increment on every new connection (wraps 0-255)
+    uint64_t m_bdSeq = 0;
+    // Data Sequence (0-255) for NDATA messages
+    uint64_t m_seq = 0;
+    std::string m_node_id = "gateway_hub_v3"; // User defined default
 
     // --- Private Method Declarations ---
     bool _IsDeviceNameInUse_NoLock(const std::string& device_name);
@@ -480,6 +508,10 @@ private:
     void RunAggregator();
     void RunCloudLink();
     void _UpdateDeviceMap(const std::string& json_data);
+    static int MessageArrived(void* context, char* topicName, int topicLen, MQTTClient_message* message);
+    // Helpers for payload generation
+    std::string BuildDeathPayload();
+    std::string BuildBirthPayload();
 
 public:
     // --- Constructor & Destructor ---
@@ -496,6 +528,25 @@ public:
     }
 
     ~GatewayHub(); // Implementation is in the .cpp file
+
+    // --- Sparkplug B Addressing ---
+    enum class SparkplugTopicType {
+        NBIRTH, // Node Birth (Session Start)
+        NDEATH, // Node Death (Last Will)
+        NDATA,  // Node Data (Telemetry)
+        NCMD,   // Node Command (Control)
+        DBIRTH, // Device Birth
+        DDEATH, // Device Death
+        DDATA,  // Device Data
+        DCMD    // Device Command
+    };
+
+    // Constants for Sparkplug B ID
+    const std::string SP_VERSION = "spBv1.0";
+    const std::string SP_GROUP_ID = "Factory_A";
+
+    // Helper function to generate topics dynamically
+    std::string GetSparkplugTopic(SparkplugTopicType type, const std::string& device_id = "");
 
     // Configuration (Public for UI access, or make getters/setters)
     // std::string m_mqtt_broker_url = "ssl://broker.emqx.io:8883"; // Default secure broker
@@ -542,5 +593,8 @@ public:
     void SendTestCommand(const std::string& device_id, const std::string& payload_json);
     void RestartCloudLink(); // Call this when UI settings change
     bool GetCloudStatus() const { return m_cloud_connected; }
+    void SetCloudStatus(bool status) { m_cloud_connected = status; }
+    void SetHubID(const std::string& id) { m_node_id = id; }
+    std::string GetHubID() const { return m_node_id; }
 };
 

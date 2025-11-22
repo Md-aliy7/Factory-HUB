@@ -1162,6 +1162,11 @@ void GatewayHub::Start() {
     m_proxy_running = true;
     m_aggregator_running = true;
 
+    // [TEST] Verify Protobuf is linked correctly
+    SparkplugB::Payload test_payload;
+    test_payload.set_timestamp(std::time(nullptr));
+    std::cout << "[SYSTEM] Protobuf Integration Check: SUCCESS. Payload Object Created." << std::endl;
+
     // [FIX 1] Bind the Router Socket ONCE here
     try {
         m_cmd_router_socket.bind("inproc://command_stream");
@@ -1388,87 +1393,156 @@ void GatewayHub::RestartCloudLink() {
 // RunCloudLink - The Bidirectional Bridge
 // =================================================================================
 void GatewayHub::RunCloudLink() {
-    // 1. ZMQ Setup
+    // Setup ZMQ Subscriber (Ingress: Device -> Hub)
     zmq::socket_t data_sub(m_zmq_context, zmq::socket_type::sub);
-    try {
-        data_sub.connect("inproc://data_pubsub");
-        data_sub.set(zmq::sockopt::subscribe, "");
-    }
-    catch (const std::exception& e) {
-        AddLog("CloudLink ZMQ Init Error: " + std::string(e.what()), LogType::SYSTEM);
-        return;
-    }
+    data_sub.connect("inproc://data_pubsub");
+    data_sub.set(zmq::sockopt::subscribe, "");
 
-    // 2. MQTT Setup
-    MQTTClient client;
-    MQTTClient_create(&client, m_mqtt_broker_url.c_str(), m_mqtt_client_id.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
+    // Setup Paho MQTT Client
+    MQTTClient_create(&m_mqtt_client, "tcp://broker.emqx.io:1883", m_node_id.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
 
-    MQTTClient_connectOptions conn_opts = MQTTClient_connectOptions_initializer;
-    conn_opts.keepAliveInterval = 20;
-    conn_opts.cleansession = 1;
-    conn_opts.username = m_mqtt_username.c_str();
-    conn_opts.password = m_mqtt_password.c_str();
-    conn_opts.connectTimeout = 3;
+    // [ADDED] Register the Callback Function
+    // This tells Paho to call 'MessageArrived' when a message comes in.
+    // We pass 'this' so the static function can access GatewayHub methods.
+    MQTTClient_setCallbacks(m_mqtt_client, (void*)this, NULL, GatewayHub::MessageArrived, NULL);
 
-    MQTTClient_SSLOptions ssl_opts = MQTTClient_SSLOptions_initializer;
-    if (m_mqtt_broker_url.find("ssl://") != std::string::npos) {
-        ssl_opts.enableServerCertAuth = 0;
-        conn_opts.ssl = &ssl_opts;
-    }
+    AddLog("Cloud: Thread Started. Waiting for connection...", LogType::SYSTEM);
 
-    // [FIX 1] Set Callbacks BEFORE connecting
-    // This enables the Paho background thread to handle incoming commands automatically
-    MQTTClient_setCallbacks(client, this, NULL, CloudMsgArrived, NULL);
-
-    AddLog("CloudLink: Connecting to " + m_mqtt_broker_url + "...", LogType::SYSTEM);
-
-    int rc = MQTTClient_connect(client, &conn_opts);
-    if (rc != MQTTCLIENT_SUCCESS) {
-        AddLog("CloudLink Error: Connect failed code " + std::to_string(rc), LogType::SYSTEM);
-        m_cloud_connected = false;
-        return;
-    }
-
-    m_cloud_connected = true;
-    AddLog("CloudLink: Connected!", LogType::SYSTEM);
-
-    std::string rpc_topic = "v1/hubs/" + m_mqtt_client_id + "/rpc";
-    std::string telemetry_topic = "v1/hubs/" + m_mqtt_client_id + "/telemetry";
-
-    if ((rc = MQTTClient_subscribe(client, rpc_topic.c_str(), 1)) != MQTTCLIENT_SUCCESS) {
-        AddLog("CloudLink Error: Subscribe failed code " + std::to_string(rc), LogType::SYSTEM);
-    }
-    else {
-        AddLog("CloudLink: Listening for commands on " + rpc_topic, LogType::SYSTEM);
-    }
-
-    // 4. Main Loop - Now simplifies to just handling Ingress
     while (m_command_bridge_running && !m_cloud_stop_signal) {
 
-        // --- A. INGRESS (Device -> WebUI) ---
-        zmq::message_t z_msg;
-        // Non-blocking check. If we have data, send it.
-        if (data_sub.recv(z_msg, zmq::recv_flags::dontwait)) {
-            std::string payload(static_cast<char*>(z_msg.data()), z_msg.size());
-            if (g_log_show_ingress) AddLog("Cloud TX: " + payload, LogType::INGRESS);
-            MQTTClient_message pubmsg = MQTTClient_message_initializer;
-            pubmsg.payload = (void*)payload.data();
-            pubmsg.payloadlen = (int)payload.size();
-            pubmsg.qos = 0;
-            pubmsg.retained = 0;
+        // =================================================================
+        // PART A: CONNECTION MANAGEMENT
+        // =================================================================
+        if (!MQTTClient_isConnected(m_mqtt_client)) {
+            SetCloudStatus(false);
 
-            MQTTClient_publishMessage(client, telemetry_topic.c_str(), &pubmsg, NULL);
+            m_bdSeq++;
+            if (m_bdSeq > 255) m_bdSeq = 0;
+
+            MQTTClient_connectOptions conn_opts = MQTTClient_connectOptions_initializer;
+            conn_opts.keepAliveInterval = 20;
+            conn_opts.cleansession = 1;
+
+            // Last Will (NDEATH)
+            std::string topic_ndeath = GetSparkplugTopic(SparkplugTopicType::NDEATH);
+            std::string payload_ndeath = BuildDeathPayload();
+            MQTTClient_willOptions will_opts = MQTTClient_willOptions_initializer;
+            will_opts.topicName = topic_ndeath.c_str();
+            will_opts.message = nullptr;
+            will_opts.payload.len = (int)payload_ndeath.size();
+            will_opts.payload.data = (void*)payload_ndeath.data();
+            will_opts.qos = 0;
+            will_opts.retained = 0;
+            conn_opts.will = &will_opts;
+
+            // Attempt Connection
+            int rc = MQTTClient_connect(m_mqtt_client, &conn_opts);
+
+            if (rc == MQTTCLIENT_SUCCESS) {
+                SetCloudStatus(true);
+                AddLog("Cloud: Connected! Sending NBIRTH...", LogType::SYSTEM);
+
+                // [ADDED] Subscribe to Device Commands (DCMD)
+                // spBv1.0/Factory_A/DCMD/HubDevice1/+
+                std::string dcmd_sub = "spBv1.0/Factory_A/DCMD/" + m_node_id + "/+";
+                MQTTClient_subscribe(m_mqtt_client, dcmd_sub.c_str(), 0);
+                AddLog("Cloud: Subscribed to " + dcmd_sub, LogType::SYSTEM);
+
+                // Send NBIRTH
+                std::string topic_nbirth = GetSparkplugTopic(SparkplugTopicType::NBIRTH);
+                std::string payload_nbirth = BuildBirthPayload();
+                MQTTClient_message pubmsg = MQTTClient_message_initializer;
+                pubmsg.payloadlen = (int)payload_nbirth.size();
+                pubmsg.payload = (void*)payload_nbirth.data();
+                pubmsg.qos = 0;
+                pubmsg.retained = 0;
+                MQTTClient_publishMessage(m_mqtt_client, topic_nbirth.c_str(), &pubmsg, NULL);
+            }
+            else {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                continue;
+            }
+        }
+        // =================================================================
+        // PART B: DATA LOOP
+        // =================================================================
+
+        zmq::message_t z_msg;
+        // Non-blocking check so we can loop back to check connection status often
+        if (data_sub.recv(z_msg, zmq::recv_flags::dontwait)) {
+            std::string json_str(static_cast<char*>(z_msg.data()), z_msg.size());
+
+            // [MODIFIED] New Payload Logic: HubID + DeviceID + RawPayload
+            try {
+                auto json_data = nlohmann::json::parse(json_str);
+                std::string device_id = json_data.value("deviceId", "Unknown_Device");
+
+                // 1. Create Protobuf Payload
+                SparkplugB::Payload sp_payload;
+                sp_payload.set_timestamp(std::time(nullptr));
+                sp_payload.set_seq(m_seq++);
+                if (m_seq > 255) m_seq = 0;
+
+                // 2. ENFORCE USER REQUIREMENT: (Hub ID, Device ID, Payload)
+
+                // Metric A: Hub ID
+                auto* m_hub = sp_payload.add_metrics();
+                m_hub->set_name("Meta/HubID");
+                m_hub->set_datatype(SparkplugB::DataType::String);
+                m_hub->set_string_value(m_node_id);
+
+                // Metric B: Device ID
+                auto* m_dev = sp_payload.add_metrics();
+                m_dev->set_name("Meta/DeviceID");
+                m_dev->set_datatype(SparkplugB::DataType::String);
+                m_dev->set_string_value(device_id);
+
+                // Metric C: The Actual Data Payload
+                auto* m_data = sp_payload.add_metrics();
+                m_data->set_name("Data/Payload");
+                m_data->set_datatype(SparkplugB::DataType::String);
+
+                // [FIX] Extract ONLY the "payload" sub-object and dump it to string
+                if (json_data.contains("payload")) {
+                    // .dump() converts the JSON object back to a string
+                    m_data->set_string_value(json_data["payload"].dump());
+                }
+                else {
+                    // Fallback: if the structure is weird, send the whole thing or an error
+                    m_data->set_string_value("{}");
+                }
+
+                // 3. Publish to NDATA (Unified Stream)
+                // Note: We Serialize to string then publish
+                std::string binary_payload;
+                if (sp_payload.SerializeToString(&binary_payload)) {
+                    std::string topic_ndata = GetSparkplugTopic(SparkplugTopicType::NDATA);
+
+                    MQTTClient_message pubmsg = MQTTClient_message_initializer;
+                    pubmsg.payload = (void*)binary_payload.data();
+                    pubmsg.payloadlen = (int)binary_payload.size();
+                    pubmsg.qos = 0;
+                    pubmsg.retained = 0;
+
+                    MQTTClient_publishMessage(m_mqtt_client, topic_ndata.c_str(), &pubmsg, NULL);
+
+                    if (g_log_show_ingress) {
+                        AddLog("Cloud TX: " + std::to_string(binary_payload.size()) + " bytes (Hub:" + m_node_id + ", Dev:" + device_id + ")", LogType::INGRESS);
+                    }
+                }
+            }
+            catch (const std::exception& e) {
+                AddLog("Cloud Error: Invalid JSON ingress: " + std::string(e.what()), LogType::SYSTEM);
+            }
         }
         else {
-            // [FIX 2] Sleep briefly to prevent high CPU usage when idle
-            // The incoming commands are now handled by Paho's background thread
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
 
-    MQTTClient_disconnect(client, 1000);
-    MQTTClient_destroy(&client);
-    m_cloud_connected = false;
+    // Cleanup
+    MQTTClient_disconnect(m_mqtt_client, 10000);
+    MQTTClient_destroy(&m_mqtt_client);
 }
 
 // =================================================================================
@@ -1727,3 +1801,152 @@ void GatewayHub::SendTestCommand(const std::string& device_id, const std::string
     }
 }
 
+// =================================================================================
+// Sparkplug B Topic Generator
+// =================================================================================
+std::string GatewayHub::GetSparkplugTopic(SparkplugTopicType type, const std::string& device_id) {
+    std::string msg_type;
+
+    switch (type) {
+    case SparkplugTopicType::NBIRTH: msg_type = "NBIRTH"; break;
+    case SparkplugTopicType::NDEATH: msg_type = "NDEATH"; break;
+    case SparkplugTopicType::NDATA:  msg_type = "NDATA";  break;
+    case SparkplugTopicType::NCMD:   msg_type = "NCMD";   break;
+    case SparkplugTopicType::DBIRTH: msg_type = "DBIRTH"; break;
+    case SparkplugTopicType::DDEATH: msg_type = "DDEATH"; break;
+    case SparkplugTopicType::DDATA:  msg_type = "DDATA";  break;
+    case SparkplugTopicType::DCMD:   msg_type = "DCMD";   break;
+    default: msg_type = "NDATA"; break;
+    }
+
+    // Structure: spBv1.0 / Group_ID / Message_Type / Edge_Node_ID / [Device_ID]
+    std::stringstream ss;
+    ss << SP_VERSION << "/" << SP_GROUP_ID << "/" << msg_type << "/" << m_node_id;
+
+    // If it is a Device message (starts with 'D'), append the Device ID
+    if (!device_id.empty() && (msg_type[0] == 'D')) {
+        ss << "/" << device_id;
+    }
+
+    return ss.str();
+}
+
+// =================================================================================
+// Sparkplug B Payload Builders
+// =================================================================================
+std::string GatewayHub::BuildDeathPayload() {
+    SparkplugB::Payload payload;
+    payload.set_timestamp(std::time(nullptr));
+
+    // Metric: bdSeq (Mandatory for NDEATH)
+    auto* metric = payload.add_metrics();
+    metric->set_name("bdSeq");
+    metric->set_datatype(SparkplugB::DataType::UInt64);
+    metric->set_long_value(m_bdSeq);
+
+    // Serialize to binary string
+    std::string output;
+    payload.SerializeToString(&output);
+    return output;
+}
+
+std::string GatewayHub::BuildBirthPayload() {
+    SparkplugB::Payload payload;
+    payload.set_timestamp(std::time(nullptr));
+    payload.set_uuid(m_node_id);
+
+    // 1. Mandatory Metric: bdSeq (Session Tracker)
+    auto* m_seq = payload.add_metrics();
+    m_seq->set_name("bdSeq");
+    m_seq->set_datatype(SparkplugB::DataType::UInt64);
+    m_seq->set_long_value(m_bdSeq);
+
+    // 2. Mandatory Metric: Node Control/Rebirth
+    auto* m_rebirth = payload.add_metrics();
+    m_rebirth->set_name("Node Control/Rebirth");
+    m_rebirth->set_datatype(SparkplugB::DataType::Boolean);
+    m_rebirth->set_boolean_value(false);
+
+    // 3. System Metrics
+    auto* m_status = payload.add_metrics();
+    m_status->set_name("System/Status");
+    m_status->set_datatype(SparkplugB::DataType::String);
+    m_status->set_string_value("ONLINE");
+
+    // 4. REAL SCENARIO: Iterate through known devices to register them
+    // We lock the mutex to safely read the device map
+    {
+        std::lock_guard<std::mutex> lock(m_devices_mutex);
+        for (const auto& [device_id, device_data] : m_devices) {
+            // Register a metric for this device's connection status
+            auto* m_dev = payload.add_metrics();
+            m_dev->set_name("Devices/" + device_id + "/Status");
+            m_dev->set_datatype(SparkplugB::DataType::String);
+            m_dev->set_string_value("CONNECTED");
+
+            // Note: In Phase 4, you can also loop through specific tags here
+            // e.g., "Devices/" + device_id + "/Temperature"
+        }
+    }
+
+    std::string output;
+    payload.SerializeToString(&output);
+    return output;
+}
+
+// =================================================================================
+// Static MQTT Callback (Must match Paho MQTT signature)
+// =================================================================================
+int GatewayHub::MessageArrived(void* context, char* topicName, int topicLen, MQTTClient_message* message) {
+    GatewayHub* hub = (GatewayHub*)context;
+    std::string topic(topicName);
+
+    // 1. Parse Topic to find Target Device ID
+    // Format: spBv1.0 / Group / DCMD / EdgeNodeID / DeviceID
+    std::vector<std::string> tokens;
+    std::stringstream ss(topic);
+    std::string segment;
+    while (std::getline(ss, segment, '/')) {
+        tokens.push_back(segment);
+    }
+
+    // Check if this is a Device Command (DCMD) targeting a specific device
+    // tokens[0]=ver, [1]=Group, [2]=MsgType, [3]=Node, [4]=Device
+    if (tokens.size() >= 5 && tokens[2] == "DCMD") {
+        std::string targetDeviceID = tokens[4];
+
+        // 2. Parse Sparkplug B Protobuf Payload to get the JSON command string
+        // Note: Ensure you have the correct namespace for your generated proto files.
+        // It is usually org::eclipse::tahu::protobuf::Payload or SparkplugB::Payload
+        SparkplugB::Payload sp_payload;
+        bool parsed = sp_payload.ParseFromArray(message->payload, message->payloadlen);
+
+        if (parsed) {
+            std::string commandJson = "";
+
+            // Iterate metrics to find the command string (usually in "Data/Payload" or similar)
+            for (int i = 0; i < sp_payload.metrics_size(); i++) {
+                const auto& metric = sp_payload.metrics(i);
+                if (metric.datatype() == SparkplugB::DataType::String) {
+                    commandJson = metric.string_value();
+                    break; // Use the first string metric as the command
+                }
+            }
+
+            if (!commandJson.empty()) {
+                AddLog("Cloud RX: Command for " + targetDeviceID + " -> " + commandJson, LogType::EGRESS);
+
+                // 3. Route to internal Adapter (Reusing your existing logic)
+                hub->SendTestCommand(targetDeviceID, commandJson);
+            }
+        }
+        else {
+            AddLog("Cloud RX: Failed to parse DCMD Protobuf.", LogType::SYSTEM);
+        }
+    }
+
+    // Cleanup Paho message resources
+    MQTTClient_freeMessage(&message);
+    MQTTClient_free(topicName);
+    return 1; // Return 1 to indicate success
+}

@@ -17,6 +17,27 @@ void DrawGatewayUI(GatewayHub& hub) {
     if (hub.GetCloudStatus()) ImGui::TextColored(ImVec4(0, 1, 0, 1), "CLOUD CONNECTED");
     else ImGui::TextColored(ImVec4(1, 0, 0, 1), "CLOUD DISCONNECTED");
 
+    // [ADDED] Hub ID Configuration
+    ImGui::Separator();
+    static char hubIdBuf[128] = "";
+
+    // Sync buffer if empty or disconnected (first run)
+    if (std::string(hubIdBuf).empty()) {
+        strcpy(hubIdBuf, hub.GetHubID().c_str());
+    }
+
+    if (!hub.GetCloudStatus()) {
+        if (ImGui::InputText("Hub Client ID", hubIdBuf, IM_ARRAYSIZE(hubIdBuf))) {
+            hub.SetHubID(std::string(hubIdBuf));
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(Editable only when disconnected)");
+    }
+    else {
+        ImGui::LabelText("Hub Client ID", "%s", hub.GetHubID().c_str());
+    }
+    ImGui::Separator();
+
     if (ImGui::BeginTabBar("MainTabs")) {
         // --- Tab 1: Live Log ---
         if (ImGui::BeginTabItem("Live Log")) {
@@ -372,7 +393,6 @@ void DrawGatewayUI(GatewayHub& hub) {
 
             // Static buffers for the Text Input fields
             static char broker_buf[256];
-            static char id_buf[128];
             static char user_buf[128];
             static char pass_buf[128];
             static bool init_ui = false;
@@ -380,7 +400,6 @@ void DrawGatewayUI(GatewayHub& hub) {
             // Initialize buffers ONCE with current Hub values
             if (!init_ui) {
                 strcpy(broker_buf, hub.m_mqtt_broker_url.c_str());
-                strcpy(id_buf, hub.m_mqtt_client_id.c_str());
                 strcpy(user_buf, hub.m_mqtt_username.c_str());
                 strcpy(pass_buf, hub.m_mqtt_password.c_str());
                 init_ui = true;
@@ -389,8 +408,16 @@ void DrawGatewayUI(GatewayHub& hub) {
             // 1. Configuration Inputs
             ImGui::InputText("Broker URL", broker_buf, 256);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("e.g. tcp://localhost:1883 or ssl://broker.emqx.io:8883");
-
-            ImGui::InputText("Client ID", id_buf, 128);
+            if (!hub.GetCloudStatus()) {
+                if (ImGui::InputText("Hub Client ID", hubIdBuf, IM_ARRAYSIZE(hubIdBuf))) {
+                    hub.SetHubID(std::string(hubIdBuf));
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(Editable only when disconnected)");
+            }
+            else {
+                ImGui::LabelText("Hub Client ID", "%s", hub.GetHubID().c_str());
+            }
             ImGui::InputText("Username", user_buf, 128);
             ImGui::InputText("Password", pass_buf, 128, ImGuiInputTextFlags_Password);
 
@@ -419,7 +446,7 @@ void DrawGatewayUI(GatewayHub& hub) {
             if (ImGui::Button("Apply & Connect", ImVec2(200, 30))) {
                 // explicit update of hub variables from buffers
                 hub.m_mqtt_broker_url = std::string(broker_buf);
-                hub.m_mqtt_client_id = std::string(id_buf);
+                hub.m_mqtt_client_id = std::string(hubIdBuf);
                 hub.m_mqtt_username = std::string(user_buf);
                 hub.m_mqtt_password = std::string(pass_buf);
 
@@ -427,9 +454,11 @@ void DrawGatewayUI(GatewayHub& hub) {
                 hub.RestartCloudLink();
             }
             ImGui::Separator();
-            ImGui::Text("Topics:");
-            ImGui::BulletText("Publish: v1/hubs/%s/telemetry", id_buf);
-            ImGui::BulletText("Subscribe: v1/hubs/%s/rpc", id_buf);
+            ImGui::Text("Sparkplug B Topics:");
+            // Use the new helper function to show the real topics
+            ImGui::BulletText("Node Data:   %s", hub.GetSparkplugTopic(GatewayHub::SparkplugTopicType::NDATA).c_str());
+            ImGui::BulletText("Node CMD:    %s", hub.GetSparkplugTopic(GatewayHub::SparkplugTopicType::NCMD).c_str());
+            ImGui::BulletText("Device Data: %s", hub.GetSparkplugTopic(GatewayHub::SparkplugTopicType::DDATA, "Device_1").c_str());
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

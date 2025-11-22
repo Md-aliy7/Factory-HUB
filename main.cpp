@@ -1,35 +1,43 @@
 /*
  * Multiprotocol Gateway Hub (V3 - fully cross-platform for Windows, Linux, and macOS)
  *
- * Architecture (Decoupled PUB/SUB):
- * 1. Main Thread: Runs Dear ImGui loop.
+ * Architecture (Hub-Broker-Client Model):
+ * 1. Main Thread: Runs Dear ImGui loop (Local Visualization).
  * 2. GatewayHub Class: Central manager. Owns Asio io_context.
  * 3. Asio Thread Pool: A fixed-size thread pool executes async work
  * for polling adapters (Modbus, OPC-UA).
  *
  * 4. Core Background Threads (DECOUPLED):
  *
- * - "Hot Path" (Data to Web):
- * - RunDataProxy: New thread. Runs a fast ZMQ PULL->PUB proxy.
+ * - "Hot Path" (Data Uplink / Telemetry):
+ * - RunDataProxy: Runs a fast ZMQ PULL->PUB proxy.
  * (PULL "inproc://data_ingress", PUB "inproc://data_pubsub")
- * - RunUwsSubscriber: New thread. SUBscribes to "data_pubsub",
- * logs Ingress, and pushes data to the uWS queue.
- * - RunUwsServer: Runs the uWS::Loop, publishing data from the queue.
+ * - RunCloudLink: [NEW] Acts as an MQTT Client (Paho).
+ * 1. Connects outbound to Central Broker (TCP/SSL).
+ * 2. Subscribes to internal ZMQ "data_pubsub".
+ * 3. Publishes data to "v1/hubs/<HUB_ID>/telemetry".
+ * 4. Listens for commands on "v1/hubs/<HUB_ID>/rpc".
  *
- * - "Cold Path" (Data to UI):
- * - RunAggregator: New thread. SUBscribes to "data_pubsub" on a
- * slow timer (500ms) to update the ImGui device map.
+ * - "Cold Path" (Local UI Visualization):
+ * - RunAggregator: Subscribes to internal ZMQ "data_pubsub" on a
+ * slow timer (500ms) to update the local ImGui device map.
  *
- * - "Command Path" (Web to Device):
- * - RunCommandBridge: (Old ZmqBridge) Now *only* handles commands
- * from the UI and adapter heartbeats.
+ * - "Command Path" (Cloud/UI to Device):
+ * - RunCommandBridge: ZMQ Router. Handles commands from:
+ * 1. Local ImGui inputs.
+ * 2. Remote MQTT RPCs (via RouteCloudCommand).
+ * 3. Adapter heartbeats.
  *
  * 5. Dynamic Adapters (IProtocolAdapter):
  * - Polling (Modbus, OPC-UA): Use Asio timers.
  * - Event-Based (MQTT, ZMQ): Use "thread-per-device" with Reaper.
  * - All adapters PUSH data to "inproc://data_ingress".
+ *
+ * 6. Scalability & Security:
+ * - No open ports required on the Hub (Firewall friendly).
+ * - Authentication via Mutual TLS (mTLS) or Token-based auth.
+ * - Hub acts purely as an Edge Client.
  */
-
 
 // --- Standard C++ Libraries ---
 #include <iostream>
@@ -146,5 +154,6 @@ int main(int, char**) {
 
     return 0;
 }
+
 
 

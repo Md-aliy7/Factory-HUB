@@ -1,5 +1,5 @@
 /*
- * Multiprotocol Gateway Hub (V3 - fully cross-platform for Windows, Linux, and macOS)
+ * Multiprotocol Gateway Hub (V3 - Sparkplug B Edge Node)
  *
  * Architecture (Hub-Broker-Client Model):
  * 1. Main Thread: Runs Dear ImGui loop (Local Visualization).
@@ -11,32 +11,43 @@
  *
  * - "Hot Path" (Data Uplink / Telemetry):
  * - RunDataProxy: Runs a fast ZMQ PULL->PUB proxy.
- * (PULL "inproc://data_ingress", PUB "inproc://data_pubsub")
- * - RunCloudLink: [NEW] Acts as an MQTT Client (Paho).
- * 1. Connects outbound to Central Broker (TCP/SSL).
- * 2. Subscribes to internal ZMQ "data_pubsub".
- * 3. Publishes data to "v1/hubs/<HUB_ID>/telemetry".
- * 4. Listens for commands on "v1/hubs/<HUB_ID>/rpc".
+ * (PULL "inproc://data_ingress" -> PUB "inproc://data_pubsub")
+ * Aggregates raw JSON from all adapters into a unified internal stream.
+ *
+ * - RunCloudLink: [UPDATED] Acts as a Sparkplug B Edge Node.
+ * 1. Connects outbound to Central Broker (TCP/WSS).
+ * 2. Manages Session State: Sends NBIRTH (Birth Certificate) and LWT (NDEATH).
+ * 3. Subscribes to internal ZMQ "data_pubsub".
+ * 4. Encodes data into Google Protobuf (Sparkplug B Payload).
+ * - Metric A: Meta/HubID
+ * - Metric B: Meta/DeviceID
+ * - Metric C: Data/Payload (The JSON string)
+ * 5. Publishes to "spBv1.0/<GROUP>/NDATA/<NODE_ID>".
  *
  * - "Cold Path" (Local UI Visualization):
  * - RunAggregator: Subscribes to internal ZMQ "data_pubsub" on a
  * slow timer (500ms) to update the local ImGui device map.
+ * Parses the raw JSON to update "Last Value" columns in the UI.
  *
  * - "Command Path" (Cloud/UI to Device):
- * - RunCommandBridge: ZMQ Router. Handles commands from:
- * 1. Local ImGui inputs.
- * 2. Remote MQTT RPCs (via RouteCloudCommand).
- * 3. Adapter heartbeats.
+ * - MessageArrived (Static Callback): Intercepts Cloud traffic.
+ * 1. Listens on "spBv1.0/<GROUP>/DCMD/<NODE_ID>/+".
+ * 2. Extracts Target Device ID from the Topic string.
+ * 3. Decodes Protobuf payload to find the "Command" string metric.
+ * 4. Forwards decoded JSON to the Command Queue.
+ *
+ * - RunCommandBridge: ZMQ Router (inproc://command_stream).
+ * Routes commands from the Queue to the specific Adapter/Device.
  *
  * 5. Dynamic Adapters (IProtocolAdapter):
  * - Polling (Modbus, OPC-UA): Use Asio timers.
  * - Event-Based (MQTT, ZMQ): Use "thread-per-device" with Reaper.
- * - All adapters PUSH data to "inproc://data_ingress".
+ * - All adapters PUSH JSON data to "inproc://data_ingress".
  *
- * 6. Scalability & Security:
- * - No open ports required on the Hub (Firewall friendly).
- * - Authentication via Mutual TLS (mTLS) or Token-based auth.
- * - Hub acts purely as an Edge Client.
+ * 6. Scalability & Compliance:
+ * - Sparkplug B Compliant: Enforces Topic Namespace and Payload definitions.
+ * - Bandwidth Efficient: Uses binary Protobuf instead of raw text over the wire.
+ * - Security: No open inbound ports; uses outbound MQTT connection only.
  */
 
 // --- Standard C++ Libraries ---
@@ -154,6 +165,7 @@ int main(int, char**) {
 
     return 0;
 }
+
 
 
 

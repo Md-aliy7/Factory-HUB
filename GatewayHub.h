@@ -29,7 +29,9 @@
 #include <chrono>
 #include <map>
 #include <deque>
-#include <nlohmann/json.hpp>
+#include <shared_mutex>
+#include <unordered_map>
+#include <simdjson.h>
 
 // protobuf 5.29.5 is required
 // [ADDED] Sparkplug B Protobuf Definitions
@@ -86,8 +88,8 @@ extern int s_ws_port;
 extern std::string s_ws_host;
 
 // --- Global Logging & Notification System ---
-extern std::mutex g_log_mutex;
-extern std::vector<std::string> g_logs;
+extern std::deque<std::string> g_logs;
+extern std::shared_mutex g_log_mutex; // [OPTIMIZATION]
 extern bool g_log_show_ingress; // Show (Device -> WebUI)
 extern bool g_log_show_egress;  // Show (WebUI -> Device)
 extern const size_t g_log_max_lines; // Max log lines
@@ -138,7 +140,7 @@ public:
 
 protected:
     // --- Pure Virtual Handler ---
-    virtual void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) = 0;
+    virtual void HandleCommand(const std::string& device_name, simdjson::ondemand::document& cmd) = 0;
 
     // --- Protected Methods (Declaration) ---
     void PushData(const std::string& json_payload);
@@ -187,7 +189,7 @@ private:
     void DoBlockingPoll();
 
     // This function's implementation is provided later, after ModbusTCPAdapter is defined
-    void OnPollComplete(const std::string& poll_status, const nlohmann::json& j_values);
+    void OnPollComplete(const std::string& poll_status, const std::vector<uint16_t>& regs);
 };
 
 // --- ModbusTCPAdapter Class Definition ---
@@ -210,11 +212,11 @@ public:
 
 protected:
     // --- Protected Methods (Declarations) ---
-    void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override;
+    void HandleCommand(const std::string& device_name, simdjson::ondemand::document& cmd) override;
 
     // --- Member Variables ---
-    std::map<std::string, std::shared_ptr<ModbusDeviceWorker>> m_devices;
-    std::mutex m_device_mutex;
+    std::unordered_map<std::string, std::shared_ptr<ModbusDeviceWorker>> m_devices;
+    std::shared_mutex m_device_mutex; // Read-Write Lock
 };
 
 // --- OpcuaAdapter ---
@@ -250,7 +252,7 @@ private:
     void DoBlockingPoll();
 
     // This function's implementation is provided later
-    void OnPollComplete(const std::string& poll_status, const nlohmann::json& j_values);
+    void OnPollComplete(const std::string& poll_status, const std::string& json_payload_str);
 };
 
 // --- OpcuaAdapter Class Definition ---
@@ -273,11 +275,11 @@ public:
 
 protected:
     // --- Protected Methods (Declarations) ---
-    void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override;
+    void HandleCommand(const std::string& device_name, simdjson::ondemand::document& cmd) override;
 
     // --- Member Variables ---
-    std::map<std::string, std::shared_ptr<OpcuaDeviceWorker>> m_devices;
-    std::mutex m_device_mutex;
+    std::unordered_map<std::string, std::shared_ptr<OpcuaDeviceWorker>> m_devices;
+    std::shared_mutex m_device_mutex; // Read-Write Lock
 };
 
 // --- MqttDeviceWorker Struct Definition ---
@@ -343,7 +345,7 @@ public:
 
 protected:
     // --- Protected Methods (Declarations) ---
-    void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override;
+    void HandleCommand(const std::string& device_name, simdjson::ondemand::document& cmd) override;
 
     // --- Static Callback ---
     static int on_message_arrived(void* context, char* topicName, int topicLen, MQTTClient_message* message);
@@ -357,7 +359,7 @@ protected:
     std::mutex m_reaper_mutex;
     std::vector<std::unique_ptr<MqttDeviceWorker>> m_reaper_queue;
     std::map<std::string, std::unique_ptr<MqttDeviceWorker>> m_devices;
-    std::mutex m_device_mutex;
+    std::shared_mutex m_device_mutex;
 };
 
 // --- ZmqAdapter ---
@@ -431,7 +433,7 @@ public:
 
 protected:
     // --- Protected Methods (Declarations) ---
-    void HandleCommand(const std::string& device_name, const nlohmann::json& cmd) override;
+    void HandleCommand(const std::string& device_name, simdjson::ondemand::document& cmd) override;
 
     // --- Private Helper/Thread Methods (Declarations) ---
     void PushIngressData(ZmqDeviceWorker* worker, const std::string& topic, const std::string& payload);
@@ -444,7 +446,7 @@ protected:
     std::mutex m_reaper_mutex;
     std::vector<std::unique_ptr<ZmqDeviceWorker>> m_reaper_queue;
     std::map<std::string, std::unique_ptr<ZmqDeviceWorker>> m_devices;
-    std::mutex m_device_mutex;
+    std::shared_mutex m_device_mutex;
 };
 
 // --- Struct Definitions ---
@@ -462,17 +464,22 @@ struct DeviceData {
 class GatewayHub {
 private:
     // --- Member Variables ---
-    std::map<std::string, DeviceData> m_devices;
-    std::mutex m_devices_mutex;
-    std::map<std::string, std::unique_ptr<IProtocolAdapter>> m_adapters;
-    mutable std::mutex m_adapters_mutex;
+    // High-performance containers
+    std::unordered_map<std::string, DeviceData> m_devices;
+    mutable std::mutex m_devices_mutex; // Allows UI to read while Hub writes
+
+    std::unordered_map<std::string, std::unique_ptr<IProtocolAdapter>> m_adapters;
+    mutable std::shared_mutex m_adapters_mutex;
+
+    // Simdjson Parser Instance (Reuse to save memory)
+    simdjson::ondemand::parser m_json_parser;
 
     // ZMQ
     zmq::context_t m_zmq_context;
     std::thread m_command_bridge_thread;
     std::atomic<bool> m_command_bridge_running;
     zmq::socket_t m_cmd_router_socket;
-    std::queue<nlohmann::json> m_command_queue;
+    std::queue<std::string> m_command_queue;
     std::mutex m_command_queue_mutex;
 
     // V3 Data Proxy Thread
@@ -499,7 +506,9 @@ private:
     uint64_t m_bdSeq = 0;
     // Data Sequence (0-255) for NDATA messages
     uint64_t m_seq = 0;
-    std::string m_node_id = "gateway_hub_v3"; // User defined default
+    // Organization ID for Topic Structure
+    std::string m_org_id = "Factory_A";
+    std::string m_node_id = "Gateway_hub_v3"; // User defined default
 
     // --- Private Method Declarations ---
     bool _IsDeviceNameInUse_NoLock(const std::string& device_name);
@@ -543,16 +552,16 @@ public:
 
     // Constants for Sparkplug B ID
     const std::string SP_VERSION = "spBv1.0";
-    const std::string SP_GROUP_ID = "Factory_A";
 
-    // Helper function to generate topics dynamically
+    // Helper to generate org/hubID/deviceID based topics
     std::string GetSparkplugTopic(SparkplugTopicType type, const std::string& device_id = "");
 
-    // Configuration (Public for UI access, or make getters/setters)
-    // std::string m_mqtt_broker_url = "ssl://broker.emqx.io:8883"; // Default secure broker
+    // RouteCloudCommand now accepts raw string and parses internally
     void RouteCloudCommand(const std::string& payload);
+
+    // std::string m_mqtt_broker_url = "ssl://broker.emqx.io:8883"; // Default secure broker
     std::string m_mqtt_broker_url = "tcp://localhost:1883";
-    std::string m_mqtt_client_id = "gateway_hub_v3";
+    std::string m_mqtt_client_id = "Gateway_hub_v3";
     std::string m_mqtt_username = "";
     std::string m_mqtt_password = "";
 
@@ -564,37 +573,74 @@ public:
     void Stop();
 
     bool HasAdapters() const {
-        std::lock_guard<std::mutex> lock(m_adapters_mutex);
+        std::lock_guard<std::shared_mutex> lock(m_adapters_mutex);
         return !m_adapters.empty();
     }
 
-    void GetDeviceData(std::map<std::string, DeviceData>& devices) {
+    void GetDeviceData(std::unordered_map<std::string, DeviceData>& devices) {
         std::lock_guard<std::mutex> lock(m_devices_mutex);
         devices = m_devices;
     }
 
-    void GetLogs(std::vector<std::string>& logs) {
-        std::lock_guard<std::mutex> lock(g_log_mutex);
+    void GetLogs(std::deque<std::string>& logs) {
+        std::lock_guard<std::shared_mutex> lock(g_log_mutex);
         logs = g_logs;
     }
 
     void ClearLogs();
 
+	// Adapter Management
     bool AddAdapter(const std::string& name, const std::string& protocol_type);
     bool RemoveAdapter(const std::string& name);
     std::map<std::string, std::string> GetAdapterStatuses();
     std::string GetAdapterProtocol(const std::string& adapter_name);
 
+	// Device Management
     bool AddDeviceToAdapter(const std::string& adapter_name, const std::string& device_name, const DeviceConfig& config);
     bool RemoveDeviceFromAdapter(const std::string& adapter_name, const std::string& device_name);
     bool RestartDevice(const std::string& adapter_name, const std::string& device_name);
     std::map<std::string, std::string> GetDeviceStatusesForAdapter(const std::string& adapter_name);
 
+	// Send Test Command to Device
     void SendTestCommand(const std::string& device_id, const std::string& payload_json);
+	
+    // Restart Cloud Link
     void RestartCloudLink(); // Call this when UI settings change
+
+	// Getter and Setter for Cloud Connection Status
     bool GetCloudStatus() const { return m_cloud_connected; }
     void SetCloudStatus(bool status) { m_cloud_connected = status; }
+	// Getter and Setter for Hub ID
     void SetHubID(const std::string& id) { m_node_id = id; }
     std::string GetHubID() const { return m_node_id; }
+    // Getter and Setter for Organization
+    void SetOrgID(const std::string& org) { m_org_id = org; }
+    std::string GetOrgID() const { return m_org_id; }
 };
 
+// Lightweight JSON Builder for High-Performance Telemetry Generation
+// Simdjson is read-only, so we need a fast way to write JSON without nlohmann overhead.
+class SimpleJsonBuilder {
+    std::string buffer;
+    bool firstField = true;
+public:
+    SimpleJsonBuilder() { buffer.reserve(256); buffer += "{"; }
+
+    template<typename T>
+    void add(const std::string& key, T value) {
+        if (!firstField) buffer += ",";
+        buffer += "\"" + key + "\":";
+        if constexpr (std::is_arithmetic_v<T>) buffer += std::to_string(value);
+        else buffer += "\"" + std::string(value) + "\"";
+        firstField = false;
+    }
+
+    // Special overload for pre-formatted JSON objects/arrays (raw injection)
+    void addRaw(const std::string& key, const std::string& rawJson) {
+        if (!firstField) buffer += ",";
+        buffer += "\"" + key + "\":" + rawJson;
+        firstField = false;
+    }
+
+    std::string dump() { return buffer + "}"; }
+};

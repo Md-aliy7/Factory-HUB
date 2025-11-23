@@ -17,27 +17,43 @@ void DrawGatewayUI(GatewayHub& hub) {
     if (hub.GetCloudStatus()) ImGui::TextColored(ImVec4(0, 1, 0, 1), "CLOUD CONNECTED");
     else ImGui::TextColored(ImVec4(1, 0, 0, 1), "CLOUD DISCONNECTED");
 
-    // [ADDED] Hub ID Configuration
+    // Hub ID Configuration
     ImGui::Separator();
     static char hubIdBuf[128] = "";
 
-    // Sync buffer if empty or disconnected (first run)
+    // Organization ID Buffer
+    static char orgIdBuf[128] = "";
+
+    // Sync buffers if empty (first run)
     if (std::string(hubIdBuf).empty()) {
         strcpy(hubIdBuf, hub.GetHubID().c_str());
     }
+    // Sync Org ID buffer
+    if (std::string(orgIdBuf).empty()) {
+        strcpy(orgIdBuf, hub.GetOrgID().c_str()); // Sync with current internal value
+    }
 
     if (!hub.GetCloudStatus()) {
+        // --- Hub ID Input ---
         if (ImGui::InputText("Hub Client ID", hubIdBuf, IM_ARRAYSIZE(hubIdBuf))) {
             hub.SetHubID(std::string(hubIdBuf));
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(Editable only when disconnected)");
+
+        // --- Organization ID Input ---
+        if (ImGui::InputText("Organization ID", orgIdBuf, IM_ARRAYSIZE(orgIdBuf))) {
+            hub.SetOrgID(std::string(orgIdBuf)); // Updates the hub immediately
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(Sparkplug Group ID)"); // Helpful tooltip/text
     }
     else {
+        // Read-only view when connected
         ImGui::LabelText("Hub Client ID", "%s", hub.GetHubID().c_str());
+        ImGui::LabelText("Organization ID", "%s", hub.GetOrgID().c_str());
     }
     ImGui::Separator();
-
     if (ImGui::BeginTabBar("MainTabs")) {
         // --- Tab 1: Live Log ---
         if (ImGui::BeginTabItem("Live Log")) {
@@ -51,11 +67,11 @@ void DrawGatewayUI(GatewayHub& hub) {
             ImGui::SameLine();
             ImGui::Checkbox("Show Hub -> Device (Egress)", &show_egress);
             {
-                std::lock_guard<std::mutex> lock(g_log_mutex);
+                std::lock_guard<std::shared_mutex> lock(g_log_mutex);
                 g_log_show_ingress = show_ingress;
                 g_log_show_egress = show_egress;
             }
-            static std::vector<std::string> logs;
+            static std::deque<std::string> logs;
             static int last_log_count = 0;
             hub.GetLogs(logs);
             bool scroll_to_bottom = (logs.size() != last_log_count);
@@ -75,7 +91,7 @@ void DrawGatewayUI(GatewayHub& hub) {
 
         // --- Tab 2: Device Status ---
         if (ImGui::BeginTabItem("Device Status")) {
-            static std::map<std::string, DeviceData> devices;
+            static std::unordered_map<std::string, DeviceData> devices;
             hub.GetDeviceData(devices);
             ImGui::Text("Discovered Devices: %zu", devices.size());
             if (ImGui::BeginTable("DeviceTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {

@@ -50,6 +50,7 @@
  * - Security: No open inbound ports; uses outbound MQTT connection only.
  */
 
+
 // --- Standard C++ Libraries ---
 #include <iostream>
 #include <string>
@@ -165,7 +166,5 @@ int main(int, char**) {
 
     return 0;
 }
-
-
 
 

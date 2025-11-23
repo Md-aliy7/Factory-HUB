@@ -17,12 +17,15 @@
  * - RunCloudLink: [UPDATED] Acts as a Sparkplug B Edge Node.
  * 1. Connects outbound to Central Broker (TCP/WSS).
  * 2. Manages Session State: Sends NBIRTH (Birth Certificate) and LWT (NDEATH).
- * 3. Subscribes to internal ZMQ "data_pubsub".
- * 4. Encodes data into Google Protobuf (Sparkplug B Payload).
+ * 3. Subscribes to MQTT Command Topics:
+ * - NCMD: "spBv1.0/<OrgID>/NCMD/<HubID>/#" (Node Control)
+ * - DCMD: "spBv1.0/<OrgID>/DCMD/<HubID>/+" (Device Control)
+ * 4. Subscribes to internal ZMQ "data_pubsub" for telemetry.
+ * 5. Encodes data into Google Protobuf (Sparkplug B Payload).
  * - Metric A: Meta/HubID
  * - Metric B: Meta/DeviceID
  * - Metric C: Data/Payload (The JSON string)
- * 5. Publishes to "spBv1.0/<GROUP>/NDATA/<NODE_ID>".
+ * 6. Publishes to "spBv1.0/<OrgID>/NDATA/<HubID>".
  *
  * - "Cold Path" (Local UI Visualization):
  * - RunAggregator: Subscribes to internal ZMQ "data_pubsub" on a
@@ -31,8 +34,8 @@
  *
  * - "Command Path" (Cloud/UI to Device):
  * - MessageArrived (Static Callback): Intercepts Cloud traffic.
- * 1. Listens on "spBv1.0/<GROUP>/DCMD/<NODE_ID>/+".
- * 2. Extracts Target Device ID from the Topic string.
+ * 1. Listens on "spBv1.0/<OrgID>/DCMD/<HubID>/+".
+ * 2. Extracts Target Device ID from the Topic string (e.g., "Device_1").
  * 3. Decodes Protobuf payload to find the "Command" string metric.
  * 4. Forwards decoded JSON to the Command Queue.
  *
@@ -166,5 +169,6 @@ int main(int, char**) {
 
     return 0;
 }
+
 
 

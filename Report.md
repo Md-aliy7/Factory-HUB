@@ -1,204 +1,143 @@
 # Multiprotocol Gateway Hub (V3)
 
-## Architectural Analysis & Data Flow Report
+## Architectural Analysis & Data Flow Report (Sparkplug B Edition)
 
----
+### 1\. Executive Summary
 
-## 1. Executive Summary
+This report details the software architecture of the **Multiprotocol Gateway Hub (V3)**. The system is a high-performance, multi-threaded C++ application designed to aggregate data from industrial protocols (Modbus, OPC-UA, MQTT, ZMQ) and function as a **Sparkplug B Edge Node**.
 
-This report details the software architecture and data flow of the **Multiprotocol Gateway Hub (V3)**.
-The system is a high-performance, multi-threaded C++ application designed to aggregate data from industrial protocols (**Modbus, OPC-UA, MQTT, ZMQ**) and bridge the gap between the physical edge and the cloud.
+V3 utilizes a **Centralized Broker Architecture**. The Hub acts strictly as an **Edge Node**, maintaining a single outbound TCP/SSL connection to a central MQTT Broker. This design ensures security by requiring no inbound ports.
 
-V3 transitions from a P2P server model to a **Centralized Broker Architecture (Hub-Broker-Client)**.
-In this *Middleman Topology*, the Hub acts exclusively as an **edge client**, connecting outbound via TCP to a central **MQTT Broker**.
-This design:
+**Key Architectural Changes in this Version:**
 
-* Removes inbound port requirements on the device
-* Solves NAT/Firewall traversal issues
-* Centralizes authentication and security
+  * **Protocol:** Transitioned from generic JSON to **Sparkplug B (Protobuf)** for bandwidth efficiency and state management.
+  * **State Management:** Implements `NBIRTH`, `NDEATH` (Last Will), and `NDATA` lifecycles.
+  * **Data Paths:**
+      * **Hot Path (Uplink):** ZMQ Stream $\to$ Sparkplug B Protobuf Encoder $\to$ MQTT.
+      * **Cold Path (Local UI):** Throttled ZMQ Subscriber $\to$ Dear ImGui Dashboard.
+      * **Command Path (RPC):** Sparkplug `DCMD`/`NCMD` $\to$ ZMQ Router $\to$ Device Adapter.
 
-Three distinct data paths define runtime behavior:
+-----
 
-* **Hot Path (Data Uplink):** High-throughput telemetry → Central Broker
-* **Cold Path (GUI Data):** Throttled local visualization updates
-* **Command Path (RPC):** Remote command execution using a “Target + Strip” routing protocol
+### 2\. Core Architectural Components & Threading Model
 
----
+The application uses a **Hybrid Threading Model**: `Boost.Asio` handles I/O polling for adapters, while `ZeroMQ (ZMQ)` manages lock-free internal data distribution.
 
-## 2. Core Architectural Components & Threading Model
+#### 2.1. Main Application Thread
 
-Work is divided across a dynamic thread set, using **Boost.Asio** for event polling and **ZeroMQ (ZMQ)** for lock-free internal message passing.
+  * **Count:** 1
+  * **Role:** Runs the `Dear ImGui` render loop (`DrawGatewayUI`) and handles `glfwPollEvents`. Acts as the **Local View Layer**.
 
-### 2.1. Main Application Thread
+#### 2.2. Asio Worker Pool
 
-* **Count:** 1
-* **Role:**
+  * **Threads:** Configurable (defaults to hardware concurrency).
+  * **Role:** Executes asynchronous tasks (`poll_timer`) for polling adapters (Modbus, OPC-UA).
 
-  * Runs `glfwPollEvents()`
-  * Renders the local dashboard (`DrawGatewayUI`)
-  * Acts as the local view layer
+#### 2.3. Core Hub Threads (The V3 Pipeline)
 
-### 2.2. Asio Worker Pool
+**A. RunDataProxy — 1 Thread**
 
-* **Threads:** *N* (defaults to `hardware_concurrency()`)
-* **Role:**
-  Executes async tasks for polling-based adapters (Modbus, OPC-UA), allowing a small pool to manage thousands of I/O operations.
+  * **Role:** The central data bus.
+  * **Mechanism:** ZMQ `PULL` (ingress) $\to$ `PUB` (internal broadcast).
+  * **Address:** `inproc://data_ingress` $\to$ `inproc://data_pubsub`.
 
-### 2.3. Core Hub Threads (Decoupled Runtime System)
+**B. RunCloudLink — 1 Thread (Sparkplug B Uplink)**
 
----
+  * **Technology:** Paho MQTT C Client + Google Protobuf.
+  * **Responsibilities:**
+    1.  Maintains Session State (`NBIRTH` on connect, `NDEATH` LWT).
+    2.  Subscribes to Command Topics: `spBv1.0/<Group>/DCMD/<NodeID>/+`.
+    3.  Consumes internal ZMQ JSON, **encodes to Protobuf**, and publishes to `NDATA`.
 
-#### **RunDataProxy — 1 Thread**
+**C. RunAggregator — 1 Thread (Cold Path)**
 
-* **Role:** Internal high-speed data plane heart
-* **Mechanism:** In-memory **ZMQ Proxy**
-* **Flow:**
-  `PULL (inproc://data_ingress)` → `PUB (inproc://data_pubsub)`
+  * **Role:** Feeds the Local ImGui Dashboard.
+  * **Mechanism:** ZMQ `SUB` to `data_pubsub` with a throttled timer (100ms).
+  * **Purpose:** Updates the `m_devices` map for local visualization without blocking the high-speed uplink.
 
----
+**D. RunCommandBridge — 1 Thread (Router)**
 
-#### **RunCloudLink — 1 Thread (Uplink)**
+  * **Role:** Internal RPC dispatcher.
+  * **Mechanism:** ZMQ `ROUTER` socket bound to `inproc://command_stream`.
+  * **Flow:** Receives commands from CloudLink (or UI), routes them to the specific Adapter thread using the Adapter Name as the routing ID.
 
-* **Technology:** Paho MQTT C++ Client
-* **Responsibilities:**
+-----
 
-  * Connects to Central Broker (TCP 1883/8883)
-  * Subscribes to internal `data_pubsub`
-  * Publishes telemetry → `v1/hubs/<HUB_ID>/telemetry`
-  * Subscribes to cloud RPC → `v1/hubs/<HUB_ID>/rpc`
+### 3\. Data Flow Analysis
 
----
+The V3 architecture uses a **"JSON Internally, Protobuf Externally"** strategy.
 
-#### **RunAggregator — 1 Thread (Cold Path)**
+#### 3.1. Data Ingress (Device $\to$ Cloud)
 
-* **Role:** Feeds the GUI
-* **Mechanism:**
-  SUBscribe to `data_pubsub` with a throttled timer (e.g., 100 ms) to update `m_devices`
-* **Purpose:**
-  Does **not** interfere with high-throughput paths
+**Step 1: Internal Normalization (JSON)**
+Adapters (Modbus/OPC-UA) generate a "Wrapped" JSON packet pushed to ZMQ:
 
----
+```json
+{
+  "deviceId": "Pump_A",
+  "adapterName": "Modbus_Service",
+  "payload": { "rpm": 1200, "temp": 45 }
+}
+```
 
-#### **RunCommandBridge — 1 Thread (Command Router)**
+**Step 2: Sparkplug Encoding (Protobuf)**
+The `RunCloudLink` thread captures this JSON, creates a `SparkplugB::Payload`, and maps fields:
 
-* **Role:** Internal command dispatcher
-* **Mechanism:**
-  Reads from `m_command_queue` (fed by CloudLink or UI)
-  → Uses ZMQ ROUTER socket to deliver to target Adapter
+  * **Metric A:** `Meta/DeviceID` = "Pump\_A"
+  * **Metric B:** `Data/Payload` =Stringified JSON (`"{ 'rpm': 1200... }"`).
 
----
+**Step 3: Uplink Transmission**
 
-## 3. Data Flow Analysis
+  * **Topic:** `spBv1.0/<GroupID>/NDATA/<NodeID>`
+  * **Payload:** Binary Protobuf.
 
-### The **Wrap vs. Strip** Protocol
+#### 3.2. Data Egress (Cloud $\to$ Device)
 
-The architecture strictly separates:
+**Step 1: Cloud Command**
+The Cloud publishes a Sparkplug `DCMD` message:
 
-* **Routing Logic** (Hub-level)
-* **Business Logic** (Device-level)
+  * **Topic:** `spBv1.0/<GroupID>/DCMD/<NodeID>/<DeviceID>`
+  * **Payload:** Protobuf Metric containing the command string.
 
----
+**Step 2: Hub Decoding**
+`RunCloudLink` intercepts the message via `MessageArrived` callback:
 
-### 3.1. Data Ingress (Device → WebUI)
+1.  Parses Topic to extract Target Device ID.
+2.  Parses Protobuf to extract the Command String.
 
-### **“Wrap and Tag”**
+**Step 3: Internal Routing**
+The command is wrapped in an internal JSON envelope and pushed to the `CommandQueue`. The `RunCommandBridge` routes it to the correct Adapter (e.g., ModbusTCP) which executes the write operation.
 
-Raw device output must be transported with identity metadata.
+-----
 
-1. **Device Output:**
+### 4\. Remote Web UI / SCADA Structure
 
-   ```json
-   { "temp": 25 }
-   ```
+Unlike the Local ImGui Dashboard, remote visualization now acts as a **Sparkplug B Host Application**.
 
-2. **Hub Wraps (Metadata Envelope):**
+#### 4.1. Connection Topology
 
-   ```json
-   {
-     "deviceId": "Sensor_01",
-     "timestamp": 1715000000,
-     "payload": { "temp": 25 }
-   }
-   ```
+  * **Protocol:** MQTT (TCP/WSS).
+  * **Role:** Acts as the "Primary Host" (or SCADA).
 
-3. **Cloud Uplink:**
-   Published to: `v1/hubs/<HUB_ID>/telemetry`
+#### 4.2. Data Consumption
 
-4. **WebUI:**
+Instead of reading raw JSON, the Remote UI must:
 
-   * Reads `deviceId` to route
-   * Displays `payload.temp`
+1.  Subscribe to `spBv1.0/#`.
+2.  Decode `NBIRTH` to discover devices.
+3.  Decode `NDATA` Protobufs to update live values.
 
----
+#### 4.3. Command Issuance
 
-### 3.2. Data Egress (WebUI → Device)
+To control a device, the Remote UI does not send raw JSON to a generic topic. It must publish a strictly formatted **Sparkplug DCMD** message to the specific device topic defined in Section 3.2.
 
-### **“Target and Strip”**
+-----
 
-Commands include routing data, which the Hub removes before reaching the device.
+### 5\. Supported Protocols (Current Implementation)
 
-1. **WebUI Sends Flat Command:**
+The following protocols are currently implemented in the V3 codebase:
 
-   ```json
-   {
-     "deviceID": "Sensor_01",
-     "reset": true
-   }
-   ```
-
-2. **Broker:**
-   Publishes to `v1/hubs/<HUB_ID>/rpc`
-
-3. **Hub (CloudLink → CommandBridge):**
-   Reads `deviceID` → dispatches to correct Adapter
-
-4. **Strip Stage:**
-   Device receives only clean payload:
-
-   ```json
-   { "reset": true }
-   ```
-
----
-
-## 4. Web UI Structure & Flow
-
-The Web UI acts as a **parallel client** to the Hub, connecting directly to the Central Broker via WebSockets.
-
-### 4.1. Connection Topology
-
-* **Protocol:** MQTT over WebSockets (WSS)
-* **Ports:** 8083 (standard) / 443 (SSL)
-* **Auth:** OAuth/Token-based with Broker (never with Hub)
-
-### 4.2. Data Ingress (Telemetry)
-
-* **Subscription:** `v1/hubs/+/telemetry`
-* **Flow:**
-
-  1. Receive wrapped JSON
-  2. Parse `deviceId`
-  3. Display `payload`
-
-### 4.3. Data Egress (Commands)
-
-* **Publish to:** `v1/hubs/<TARGET_HUB>/rpc`
-* **UI Logic:**
-
-  ```json
-  { "deviceID": "PLC_1", "val": 1 }
-  ```
-
----
-
-## 🧱 Final Note — Longevity of Industrial Protocols
-
-These industrial technologies remain highly relevant and are supported by the Gateway’s hybrid adapter approach:
-
-* **EtherNet/IP** — established & evolving
-* **PROFINET** — strong future, TSN-enabled
-* **EtherCAT** — continued growth (EtherCAT-G)
-* **CAN / CANopen** — foundational in embedded systems
-* **UAVCAN** — expanding rapidly in robotics/autonomy
-* **BACnet** — cornerstone of building automation
-* **RS-485** — still critical for legacy integration
+1.  **Modbus TCP:** Polling-based via `libmodbus`.
+2.  **OPC-UA:** Polling-based via `open62541` (supports NodeID read/write).
+3.  **MQTT (Device Side):** Event-based ingress for bridging 3rd party MQTT devices.
+4.  **ZeroMQ (Device Side):** Supports `SUB`, `PULL`, `REP`, and `ROUTER` patterns for high-speed IPC.

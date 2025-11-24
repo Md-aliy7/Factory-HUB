@@ -56,7 +56,7 @@ This project uses **CMake** with **CPM (C++ Package Manager)** to automatically 
   * **Messaging:** ZMQ (libzmq, cppzmq), Paho MQTT C
   * **UI:** Dear ImGui (local copy), GLFW3, GLEW
   * **Protocols:** libmodbus, open62541, ....
-  * **Utilities:** smidjson
+  * **Utilities:** simdjson
 
 ### System Requirements
 

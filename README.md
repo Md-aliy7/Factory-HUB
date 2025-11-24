@@ -1,9 +1,5 @@
 # ⚙️ Hybrid-Gateway-Hub
 
-
-https://github.com/user-attachments/assets/9941b6be-57e8-4298-ae87-203dbee78eb3
-
-
 ### High-Performance Multiprotocol Gateway Hub with Integrated Dear ImGui UI
 
 This project implements a robust, cross-platform **Edge Gateway** designed to bridge industrial protocols with a centralized cloud infrastructure. It leverages a **hybrid asynchronous architecture** using **Boost.Asio** for scheduled I/O, a **decoupled multi-threaded ZeroMQ (ZMQ)** pipeline for internal data routing, and a **Paho MQTT Client** for a secure, firewall-friendly cloud uplink.

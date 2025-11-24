@@ -55,8 +55,8 @@ This project uses **CMake** with **CPM (C++ Package Manager)** to automatically 
   * **Core:** Boost (Asio, System)
   * **Messaging:** ZMQ (libzmq, cppzmq), Paho MQTT C
   * **UI:** Dear ImGui (local copy), GLFW3, GLEW
-  * **Protocols:** libmodbus, open62541
-  * **Utilities:** nlohmann/json
+  * **Protocols:** libmodbus, open62541, ....
+  * **Utilities:** smidjson
 
 ### System Requirements
 
@@ -273,112 +273,3 @@ sudo pacman -S base-devel cmake mesa openssl libmodbus glew
    cmake --build . -j$(sysctl -n hw.ncpu)
    ./bin/Factory-HUB
    ```
-
----
-
-# 📦 4. Dependency Analysis
-
-This project relies on a mix of local source files and automated package management via **CPM (C++ Package Manager)**.
-
-### **1. Local Dependencies (Manual Build)**
-
-| Library | Purpose | Notes |
-| :--- | :--- | :--- |
-| **ImGui** (incl. `imgui_impl_glfw`, `imgui_impl_opengl3`) | Core GUI rendering system. | Included manually in the project source folder. |
-
-### **2. CPM-Managed Dependencies (Automatically Downloaded & Built)**
-
-| Library | Purpose | Notes |
-| :--- | :--- | :--- |
-| **glfw3** | Window creation & input handling; creates the OpenGL context for ImGui. | Built from source via CPM. |
-| **glew** | Loads modern OpenGL functions; required by ImGui's OpenGL3 backend. | Uses system library if available. |
-| **nlohmann\_json** | JSON serialization (Header-only). | Header-only, no compilation needed. |
-| **zeromq** | High-performance pub/sub messaging; used for the internal bus (`inproc://data_ingress`). | Built from source via CPM. |
-| **paho-mqtt-c** | **Cloud Link & MQTT Adapter.** Handles the uplink to the Central Broker and generic MQTT devices. | Built from source via CPM. |
-| **libmodbus** | Modbus TCP/RTU communication; used in `ModbusTCPAdapter`. | Uses system library if available. |
-| **open62541** | OPC-UA communication stack; used in `OpcuaAdapter`. | Built from source via CPM. |
-| **boost-asio** | Asynchronous networking & I/O operations (Timers, Thread Pool). | Built from source via CPM. |
-
-> **Note:** *uWebSockets, uSockets, and zlib have been removed in V3 as the architecture shifted from a WebSocket Server to an MQTT Client model.*
-
------
-
-### **Build Instructions**
-
-**1. Clone the repository:**
-
-```bash
-git clone https://github.com/your-username/Factory-HUB.git
-cd Factory-HUB
-```
-
-**2. Create build directory and configure:**
-
-```bash
-mkdir build
-cd build
-cmake ..
-```
-
-**3. Build the project:**
-
-```bash
-cmake --build . --config Release
-```
-
-**4. Run the application:**
-
-  * **Linux/macOS:**
-    ```bash
-    ./bin/Factory-HUB
-    ```
-  * **Windows (Command Prompt/PowerShell):**
-    ```powershell
-    .\bin\Release\Factory-HUB.exe
-    ```
-
------
-
-### **Quick Build (One-liner)**
-
-**Linux/macOS:**
-
-```bash
-mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc) && ./bin/Factory-HUB
-```
-
-**Windows (PowerShell):**
-
-```powershell
-mkdir build; cd build; cmake .. -G "Visual Studio 17 2022" -A x64; cmake --build . --config Release; .\bin\Release\Factory-HUB.exe
-```
-
------
-
-### **Troubleshooting**
-
-  * **If CMake fails to find OpenSSL:**
-
-      * **Linux:** Install `libssl-dev` (Ubuntu/Debian) or `openssl` (Arch).
-      * **macOS:** `brew install openssl` then set `-DOPENSSL_ROOT_DIR=/usr/local/opt/openssl`.
-      * **Windows:**
-          * Install via vcpkg: `.\vcpkg install openssl:x64-windows` and use `-DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake`
-          * Or download from [Win32/Win64 OpenSSL](https://slproweb.com/products/Win32OpenSSL.html) and set `-DOPENSSL_ROOT_DIR=C:\OpenSSL-Win64`.
-
-  * **Windows-specific issues:**
-
-      * **"CMake Error: Could not find CMAKE\_ROOT":** Make sure CMake is installed and added to PATH.
-      * **"LNK1104: cannot open file 'libmodbus.lib'":** Install libmodbus via vcpkg or ensure system libraries are available.
-      * **"Cannot open include file: 'GL/glew.h'":** Install GLEW via vcpkg or ensure OpenGL development libraries are installed.
-
-  * **If dependencies fail to download:**
-
-      * Check your internet connection.
-      * Some dependencies are large (Boost, Open62541). The first build may take 10–20 minutes.
-      * You can use a local cache by setting the `CPM_SOURCE_CACHE` environment variable:
-          * **Windows:** `set CPM_SOURCE_CACHE=C:\path\to\cache`
-          * **Linux/macOS:** `export CPM_SOURCE_CACHE=/path/to/cache`
-
-  * **Windows firewall/antivirus:**
-
-      * Some antivirus software may interfere with downloading dependencies via CMake. If downloads fail, temporarily disable antivirus or add the `build` directory to exclusions.

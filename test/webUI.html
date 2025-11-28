@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hub-Broker-Client Control Center</title>
+    
+    <!-- External Libraries -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="https://cdn.rawgit.com/dcodeIO/protobuf.js/6.11.2/dist/protobuf.min.js"></script>
+
+    <style>
+        :root {
+            --bg: #121212; --panel: #1e1e1e; --border: #333;
+            --accent: #007acc; --text: #e0e0e0; --success: #4caf50;
+        }
+        body { font-family: 'Segoe UI', monospace; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; }
+        
+        /* Layout */
+        .sidebar { width: 300px; background: var(--panel); padding: 20px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 15px; }
+        .main { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 20px; overflow: hidden; }
+        
+        /* Cards */
+        .card { background: #252526; padding: 15px; border-radius: 4px; border: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+        .card h3 { margin: 0 0 5px 0; font-size: 1em; color: var(--accent); text-transform: uppercase; letter-spacing: 1px; }
+        
+        /* Inputs & Buttons */
+        input, textarea { background: #1e1e1e; border: 1px solid #444; color: #fff; padding: 8px; border-radius: 3px; font-family: monospace; }
+        input:focus, textarea:focus { outline: 1px solid var(--accent); }
+        
+        button { background: var(--accent); color: white; border: none; padding: 10px; cursor: pointer; border-radius: 3px; font-weight: bold; transition: 0.2s; }
+        button:hover { opacity: 0.9; }
+        button:disabled { background: #444; cursor: not-allowed; }
+        button.disconnect { background: #d32f2f; }
+        
+        /* Logs */
+        .log-panel { flex: 1; background: #000; border: 1px solid var(--border); border-radius: 4px; padding: 10px; overflow-y: auto; font-family: 'Consolas', monospace; font-size: 13px; }
+        .log-entry { border-bottom: 1px solid #222; padding: 4px 0; display: flex; align-items: flex-start; gap: 10px; }
+        .tag { padding: 2px 6px; border-radius: 2px; font-size: 10px; font-weight: bold; text-transform: uppercase; min-width: 40px; text-align: center; }
+        .tag.SYS { background: #555; color: #fff; }
+        .tag.RX { background: #4caf50; color: #111; }
+        .tag.TX { background: #007acc; color: #fff; }
+    </style>
+</head>
+<body>
+
+    <!-- SIDEBAR: Controls -->
+    <div class="sidebar">
+        <div style="font-size: 1.2em; font-weight: bold; margin-bottom: 10px;">⚡ Sparkplug Console</div>
+
+        <!-- 1. Connection Card -->
+        <div class="card">
+            <h3>1. Connection</h3>
+            <label style="font-size:0.8em; color:#888;">MQTT Broker</label>
+            <input type="text" id="broker" value="wss://broker.emqx.io:8084/mqtt">
+            
+            <label style="font-size:0.8em; color:#888;">Organization ID (Group)</label>
+            <input type="text" id="orgId" value="Factory_A" placeholder="e.g. Factory_A">
+            
+            <label style="font-size:0.8em; color:#888;">Target Hub ID (Node)</label>
+            <input type="text" id="hubId" value="Gateway_hub_v3" placeholder="e.g. Gateway_hub_v3">
+            
+            <div style="display:flex; gap:5px;">
+                <button onclick="connect()" id="btnConnect" style="flex:1;">Connect</button>
+                <button onclick="disconnect()" class="disconnect" id="btnDisconnect" style="flex:1;" disabled>Stop</button>
+            </div>
+            <div id="status" style="margin-top:5px; font-size:0.8em; color:#888;">Status: Disconnected</div>
+        </div>
+
+        <!-- 2. Command Card -->
+        <div class="card">
+            <h3>2. Send Command</h3>
+            <label style="font-size:0.8em; color:#888;">Target Device ID</label>
+            <input type="text" id="cmdDevice" value="Device_1">
+            
+            <label style="font-size:0.8em; color:#888;">JSON Payload</label>
+            <textarea id="cmdPayload" rows="4">{"op": "START", "speed": 100}</textarea>
+            
+            <button onclick="sendCommand()" id="btnSend" disabled>Send DCMD</button>
+        </div>
+        
+        <button onclick="clearLog()" style="background:#333; margin-top:auto;">Clear Logs</button>
+    </div>
+
+    <!-- MAIN: Logs -->
+    <div class="main">
+        <div class="log-panel" id="consoleLog">
+            <div style="color:#666; font-style:italic;">System Ready. waiting for connection...</div>
+        </div>
+    </div>
+
+    <script>
+        let client = null;
+        let PayloadType = null;
+        const protoUrl = "https://raw.githubusercontent.com/eclipse/tahu/master/sparkplug_b/sparkplug_b.proto";
+
+        // 1. Load Protobuf Definition on Startup
+        protobuf.load(protoUrl, function(err, root) {
+            if (err) return console.error("Failed to load proto:", err);
+            // Namespace usually: org.eclipse.tahu.protobuf.Payload
+            PayloadType = root.lookupType("org.eclipse.tahu.protobuf.Payload");
+            log("SYS", "System", "Sparkplug B Protobuf definition loaded successfully.");
+        });
+
+        // 2. Connect to Broker
+        function connect() {
+            const url = document.getElementById('broker').value;
+            const hubId = document.getElementById('hubId').value;
+            const orgId = document.getElementById('orgId').value; // [MODIFIED] Get Org ID
+
+            if(!hubId || !orgId) return alert("Please enter both Organization ID and Hub ID");
+
+            document.getElementById('status').innerText = "Connecting...";
+            
+            // Connect using MQTT.js
+            client = mqtt.connect(url);
+
+            client.on('connect', () => {
+                document.getElementById('status').innerText = "Status: CONNECTED";
+                document.getElementById('status').style.color = "#4caf50";
+                toggleControls(true);
+
+                // [MODIFIED] Subscribe to NDATA for the specific Org/Group and Hub/Node
+                // Topic: spBv1.0/GROUP/NDATA/NODE
+                const topic = `spBv1.0/${orgId}/NDATA/${hubId}`;
+                client.subscribe(topic, (err) => {
+                    if(!err) log("SYS", "Subscribed", topic);
+                });
+            });
+
+            client.on('message', (topic, message) => {
+                handleMessage(topic, message);
+            });
+
+            client.on('error', (err) => {
+                log("SYS", "Error", err.message);
+                document.getElementById('status').innerText = "Error: " + err.message;
+            });
+            
+            client.on('close', () => {
+                if(document.getElementById('btnDisconnect').disabled === false) {
+                     // Only show if we didn't manually disconnect
+                     document.getElementById('status').innerText = "Status: Disconnected";
+                }
+            });
+        }
+
+        // 3. Disconnect
+        function disconnect() {
+            if (client) {
+                client.end();
+                client = null;
+            }
+            document.getElementById('status').innerText = "Status: Disconnected";
+            document.getElementById('status').style.color = "#888";
+            toggleControls(false);
+            log("SYS", "System", "Disconnected by user.");
+        }
+
+        function toggleControls(connected) {
+            document.getElementById('btnConnect').disabled = connected;
+            document.getElementById('btnDisconnect').disabled = !connected;
+            document.getElementById('btnSend').disabled = !connected;
+            document.getElementById('broker').disabled = connected;
+            document.getElementById('hubId').disabled = connected;
+            document.getElementById('orgId').disabled = connected;
+        }
+
+        // 4. Send Command (DCMD)
+        function sendCommand() {
+            if (!client || !client.connected) return alert("Not connected!");
+            if (!PayloadType) return alert("Protobuf not loaded yet.");
+
+            const hubId = document.getElementById('hubId').value;
+            const orgId = document.getElementById('orgId').value; // [MODIFIED] Get Org ID
+            const deviceId = document.getElementById('cmdDevice').value;
+            const jsonStr = document.getElementById('cmdPayload').value;
+
+            // Validate JSON
+            try {
+                JSON.parse(jsonStr);
+            } catch (e) {
+                return alert("Invalid JSON in payload!");
+            }
+
+            // Create Sparkplug B Payload
+            // We verify basic structure: metrics[{ name: "Data/Payload", type: String, value: json }]
+            const payload = {
+                timestamp: Date.now(),
+                metrics: [{
+                    name: "Data/Payload", // Standard metric name used in C++ Hub
+                    datatype: 12,         // 12 = String in Sparkplug B
+                    stringValue: jsonStr
+                }]
+            };
+
+            // Verify payload
+            const errMsg = PayloadType.verify(payload);
+            if (errMsg) return log("TX", "Proto Error", errMsg);
+
+            // Encode
+            const buffer = PayloadType.encode(createMessage(payload)).finish();
+
+            // [MODIFIED] Publish Topic: spBv1.0/GROUP/DCMD/NODE/DEVICE
+            const topic = `spBv1.0/${orgId}/DCMD/${hubId}/${deviceId}`;
+            
+            client.publish(topic, buffer);
+            log("TX", topic, jsonStr);
+        }
+
+        // Helper to fix protobuf message creation
+        function createMessage(payload) {
+            return PayloadType.create(payload);
+        }
+
+        // 5. Handle Incoming Messages (NDATA)
+        function handleMessage(topic, message) {
+            if (!PayloadType) return;
+
+            try {
+                // Decode Protobuf
+                const decoded = PayloadType.decode(message);
+                const obj = PayloadType.toObject(decoded, {
+                    longs: String,
+                    enums: String,
+                    bytes: String,
+                });
+
+                // Extract sender info from topic
+                const parts = topic.split('/');
+                const deviceSource = parts.length > 4 ? parts[4] : parts[3]; // Device or Node name
+
+                let displayData = "No String Metrics Found";
+
+                // Look for our specific JSON payload metric
+                if (obj.metrics) {
+                    obj.metrics.forEach(m => {
+                        // Just for display, we look for the main payload
+                        if (m.name === "Data/Payload" && m.stringValue) {
+                            try {
+                                const innerJson = JSON.parse(m.stringValue);
+                                displayData = JSON.stringify(innerJson, null, 2); // Pretty print
+                            } catch(e) {
+                                displayData = m.stringValue;
+                            }
+                        } else if (m.datatype === "String" || m.datatype === 12) {
+                             // Fallback: show any string metric
+                             displayData = `${m.name}: ${m.stringValue}`;
+                        }
+                    });
+                }
+
+                log("RX", `From ${deviceSource}`, displayData);
+
+            } catch (e) {
+                log("RX", topic, "Decode Error: " + e.message);
+                console.error(e);
+            }
+        }
+
+        function log(type, header, content) {
+            const box = document.getElementById('consoleLog');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="tag ${type}">${type}</span> 
+                <span style="color:#4fc1ff; font-weight:bold;">${header}</span>
+                <pre style="margin:5px 0 0 0; color:#ce9178; white-space: pre-wrap;">${content}</pre>
+            `;
+            box.appendChild(entry);
+            box.scrollTop = box.scrollHeight;
+        }
+        function clearLog() { document.getElementById('consoleLog').innerHTML = ""; }
+    </script>
+</body>
+</html>

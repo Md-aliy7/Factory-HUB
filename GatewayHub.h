@@ -95,6 +95,33 @@ extern bool g_log_show_egress;  // Show (WebUI -> Device)
 extern const size_t g_log_max_lines; // Max log lines
 extern const int g_zmq_rcvhwm;        // Max queued ZMQ messages
 
+// --- ThreadSafeQueue Class Definition ---
+// This is a template, so its full definition must remain in the header.
+template <typename T>
+class ThreadSafeQueue {
+public:
+    void push(T value) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_queue.push(std::move(value));
+        m_cond.notify_one();
+    }
+
+    std::optional<T> try_pop() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_queue.empty()) {
+            return std::nullopt;
+        }
+        T value = std::move(m_queue.front());
+        m_queue.pop();
+        return value;
+    }
+
+private:
+    std::queue<T> m_queue;
+    std::mutex m_mutex;
+    std::condition_variable m_cond;
+};
+
 struct Notification {
     std::string message;
     double expiry_time;
@@ -149,9 +176,8 @@ protected:
     std::string m_name;
     zmq::context_t& m_zmq_context;
     boost::asio::io_context& m_io_context;
-    zmq::socket_t m_data_push_socket;
+    ThreadSafeQueue<std::string> m_outbound_queue;  // Thread-safe queue for buffering data from Asio threads to the ZMQ thread
     zmq::socket_t m_cmd_socket;
-    std::mutex m_zmq_push_mutex;
     std::thread m_thread;
     std::atomic<bool> m_should_stop;
 };
@@ -363,34 +389,6 @@ protected:
 };
 
 // --- ZmqAdapter ---
-// --- ThreadSafeQueue Class Definition ---
-// This is a template, so its full definition must remain in the header.
-template <typename T>
-class ThreadSafeQueue {
-public:
-    void push(T value) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_queue.push(std::move(value));
-        m_cond.notify_one();
-    }
-
-    std::optional<T> try_pop() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_queue.empty()) {
-            return std::nullopt;
-        }
-        T value = std::move(m_queue.front());
-        m_queue.pop();
-        return value;
-    }
-
-private:
-    std::queue<T> m_queue;
-    std::mutex m_mutex;
-    std::condition_variable m_cond;
-};
-
-
 // --- ZmqDeviceWorker Struct Definition ---
 // This full struct definition is needed by the ZmqAdapter class
 struct ZmqDeviceWorker {

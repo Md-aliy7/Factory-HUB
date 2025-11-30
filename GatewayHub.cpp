@@ -58,12 +58,10 @@ IProtocolAdapter::IProtocolAdapter(const std::string& name, zmq::context_t& ctx,
     : m_name(name),
     m_zmq_context(ctx),
     m_io_context(io_ctx),
-    m_data_push_socket(ctx, zmq::socket_type::push),
     m_cmd_socket(ctx, zmq::socket_type::dealer),
     m_should_stop(false)
 {
     try {
-        m_data_push_socket.connect("inproc://data_ingress");
         m_cmd_socket.set(zmq::sockopt::routing_id, m_name);
         m_cmd_socket.connect("inproc://command_stream");
         m_cmd_socket.set(zmq::sockopt::rcvhwm, g_zmq_rcvhwm);  // Limit queue to 10000 messages
@@ -76,7 +74,6 @@ IProtocolAdapter::IProtocolAdapter(const std::string& name, zmq::context_t& ctx,
 IProtocolAdapter::~IProtocolAdapter() {
     Stop();
     Join();
-    m_data_push_socket.close();
     m_cmd_socket.close();
 }
 
@@ -96,44 +93,59 @@ void IProtocolAdapter::Join() {
 
 void IProtocolAdapter::Run() {
     try {
-        m_cmd_socket.set(zmq::sockopt::rcvtimeo, 1000); // 1s timeout
-        simdjson::ondemand::parser parser; // Local parser for this thread
+        // Create the PUSH socket LOCAL to this thread.
+        zmq::socket_t data_push_socket(m_zmq_context, zmq::socket_type::push);
+        data_push_socket.connect("inproc://data_ingress");
+
+        // Configure Command Socket
+        m_cmd_socket.set(zmq::sockopt::rcvtimeo, 0); // Non-blocking (we use poll)
+
+        // Local Simdjson parser
+        simdjson::ondemand::parser parser;
+
+        // Poll Items: Only polling the Command Socket for READ
+        zmq::pollitem_t items[] = {
+            { m_cmd_socket, 0, ZMQ_POLLIN, 0 }
+        };
 
         while (!m_should_stop) {
-            zmq::message_t empty_msg;
-            zmq::message_t payload_msg;
-            std::optional<size_t> empty_size = m_cmd_socket.recv(empty_msg, zmq::recv_flags::none);
-            if (!empty_size.has_value()) {
-                continue; // Timeout
-            }
-            if (!m_cmd_socket.get(zmq::sockopt::rcvmore)) {
-                if (g_log_show_egress) AddLog("Adapter " + m_name + " received bad ZMQ command (missing payload frame).", LogType::EGRESS);
-                continue;
-            }
-            std::optional<size_t> payload_size = m_cmd_socket.recv(payload_msg, zmq::recv_flags::none);
-            if (payload_size.has_value() && payload_size.value() > 0) {
-                // [OPTIMIZATION] Simdjson Parsing
-                // We must pad the string for simdjson safety if using raw buffer, 
-                // but payload_msg.to_string() creates a copy which is safe.
-                std::string payload_str = payload_msg.to_string();
-                // Simdjson requires extra capacity in buffer, string provides it usually, 
-                // but safer to use padded_string if zero-copy is desired. 
-                // For simplicity/safety here:
-                simdjson::padded_string padded_json = payload_str;
+            // 1. Poll with timeout (e.g., 20ms). 
+            // This allows us to wake up frequently to check the m_outbound_queue.
+            int rc = zmq::poll(items, 1, std::chrono::milliseconds(20));
 
-                try {
-                    simdjson::ondemand::document doc = parser.iterate(padded_json);
-                    std::string_view target_device_sv;
+            // 2. Handle Incoming Commands (if any)
+            if (rc > 0 && (items[0].revents & ZMQ_POLLIN)) {
+                zmq::message_t empty_msg;
+                zmq::message_t payload_msg;
 
-                    if (doc["targetDevice"].get(target_device_sv) == simdjson::SUCCESS) {
-                        HandleCommand(std::string(target_device_sv), doc);
+                // Read delimiter and payload
+                m_cmd_socket.recv(empty_msg, zmq::recv_flags::none);
+                if (m_cmd_socket.recv(payload_msg, zmq::recv_flags::none)) {
+                    std::string payload_str = payload_msg.to_string();
+                    simdjson::padded_string padded_json = payload_str;
+                    try {
+                        simdjson::ondemand::document doc = parser.iterate(padded_json);
+                        std::string_view target_device_sv;
+                        if (doc["targetDevice"].get(target_device_sv) == simdjson::SUCCESS) {
+                            HandleCommand(std::string(target_device_sv), doc);
+                        }
+                    }
+                    catch (simdjson::simdjson_error& e) {
+                        AddLog("JSON Parse Error: " + std::string(e.what()));
                     }
                 }
-                catch (simdjson::simdjson_error& e) {
-                    AddLog("JSON Parse Error: " + std::string(e.what()));
-                }
+            }
+
+            // 3. Handle Outgoing Data (Drain the Queue)
+            // This safely moves data from Asio threads -> ZMQ thread -> ZMQ Socket
+            std::optional<std::string> payload;
+            while ((payload = m_outbound_queue.try_pop())) {
+                data_push_socket.send(zmq::buffer(*payload), zmq::send_flags::none);
             }
         }
+
+        // Sockets close automatically when objects go out of scope here.
+        // No need for manual close(), and no race condition with Stop().
     }
     catch (const std::exception& e) {
         if (m_should_stop) return;
@@ -142,8 +154,8 @@ void IProtocolAdapter::Run() {
 }
 
 void IProtocolAdapter::PushData(const std::string& json_payload) {
-    std::lock_guard<std::mutex> lock(m_zmq_push_mutex);
-    m_data_push_socket.send(zmq::buffer(json_payload), zmq::send_flags::none);
+    // Thread-safe push. No ZMQ socket access here.
+    m_outbound_queue.push(json_payload);
 }
 
 // --- ModbusDeviceWorker Implementations ---
@@ -681,6 +693,12 @@ bool MqttAdapter::RemoveDevice(const std::string& device_name) {
 
         auto it = m_devices.find(device_name);
         if (it == m_devices.end()) return false; // Not found
+
+        // Detach MQTT Callbacks immediately while under lock
+        if (it->second->client) {
+            // Remove callback so Paho stops calling 'on_message_arrived'
+            MQTTClient_setCallbacks(it->second->client, NULL, NULL, NULL, NULL);
+        }
 
         it->second->should_stop = true; // Signal thread to stop
         worker_to_destroy = std::move(it->second); // Move ownership
@@ -1377,9 +1395,6 @@ void GatewayHub::Stop() {
     if (m_data_proxy_thread.joinable()) m_data_proxy_thread.join();
     if (m_aggregator_thread.joinable()) m_aggregator_thread.join();
     if (m_cloud_thread.joinable()) m_cloud_thread.join();
-
-    m_cmd_router_socket.close();
-
 
     {
         std::lock_guard<std::shared_mutex> lock(m_adapters_mutex);
